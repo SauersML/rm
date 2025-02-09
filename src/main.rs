@@ -10,7 +10,7 @@ async fn main() {
     // Collect arguments
     let args: Vec<String> = env::args().collect();
     
-    // Ensure that a pattern is provided
+    // Make sure a pattern is provided
     if args.len() < 2 {
         eprintln!("Error: A pattern must be provided as a command line argument.");
         std::process::exit(1);
