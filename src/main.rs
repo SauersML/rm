@@ -33,9 +33,6 @@ async fn delete_files<P: AsRef<Path>>(pattern: P) -> Result<(), Box<dyn std::err
     let pattern_str = pattern.as_ref().to_string_lossy();
     let files = find_files_by_pattern(&pattern_str)?;
 
-    // Semaphore to control concurrency in the application
-    let semaphore = Arc::new(Semaphore::new(0)); // No concurrency limit at application level
-
     let delete_futures: Vec<_> = files.into_iter().map(|file| {
         task::spawn_blocking(move || {
             // Deleting file. This is a blocking operation so we spawn it in a blocking task
