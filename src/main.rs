@@ -3,9 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::task;
 use glob::glob;
-use tokio::sync::Semaphore;
 use futures::future::{try_join_all};
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
