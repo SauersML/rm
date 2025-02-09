@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use tokio::task;
 use glob::glob;
 use tokio::sync::Semaphore;
-use futures::future::{self, try_join_all};
+use futures::future::{try_join_all};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -37,7 +37,6 @@ async fn delete_files<P: AsRef<Path>>(pattern: P) -> Result<(), Box<dyn std::err
     let semaphore = Arc::new(Semaphore::new(0)); // No concurrency limit at application level
 
     let delete_futures: Vec<_> = files.into_iter().map(|file| {
-        let permit = semaphore.clone();
         task::spawn_blocking(move || {
             // Deleting file. This is a blocking operation so we spawn it in a blocking task
             match delete_file(&file) {
