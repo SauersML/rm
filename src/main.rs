@@ -103,7 +103,8 @@ mod benchmarks {
     use std::fs::{File};
     use std::io::Write;
     use std::path::PathBuf;
-    use std::time::{Instant};
+    use std::time::{Instant, Duration};
+
     use std::process::Command;
 
     // Helper function to create test files
@@ -159,9 +160,10 @@ mod benchmarks {
 
         println!("Comparison:");
         if rust_duration < rm_duration {
-            println!("del is faster than 'rm' by {:?}", rm_duration - rust_duration);
+            println!("Rust code is faster than 'rm' by {:?}", rm_duration - rust_duration);
         } else {
-            println!("'rm' command is faster than del by {:?}", rm_duration - rust_duration);
+            let diff = rust_duration - rm_duration; // Calculate difference correctly
+            println!("'rm' command is faster than Rust code by {:?}", diff);
         }
         println!("---");
     }
@@ -189,9 +191,10 @@ mod benchmarks {
 
         println!("Comparison:");
         if rust_duration < rm_duration {
-            println!("del is faster than 'rm' by {:?}", rm_duration - rust_duration);
+            println!("Rust code is faster than 'rm' by {:?}", rm_duration - rust_duration);
         } else {
-            println!("'rm' command is faster than del by {:?}", rm_duration - rust_duration);
+            let diff = rust_duration - rm_duration; // Calculate difference correctly
+            println!("'rm' command is faster than Rust code by {:?}", diff);
         }
         println!("---");
     }
