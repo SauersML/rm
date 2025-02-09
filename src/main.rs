@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use tokio::task;
 use glob::glob;
 use futures::future::{try_join_all};
+use indicatif::{ProgressBar, ProgressStyle};
 
 #[tokio::main]
 async fn main() {
@@ -31,11 +32,18 @@ async fn delete_files<P: AsRef<Path>>(pattern: P) -> Result<(), Box<dyn std::err
     let pattern_str = pattern.as_ref().to_string_lossy();
     let files = find_files_by_pattern(&pattern_str)?;
 
+    // Create a progress bar to show progress
+    let pb = ProgressBar::new(files.len() as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{msg} {wide_bar} {pos}/{len} ({eta})")
+        .progress_chars("##-"));
+
+    // Spawn tasks for each file
     let delete_futures: Vec<_> = files.into_iter().map(|file| {
-        task::spawn_blocking(move || {
-            // Deleting file. This is a blocking operation so we spawn it in a blocking task
-            match delete_file(&file) {
-                Ok(_) => {},
+        let pb = pb.clone(); // Clone the progress bar for each task
+        task::spawn(async move {
+            match delete_file(&file).await {
+                Ok(_) => pb.inc(1), // Increment progress bar after successful deletion
                 Err(e) => eprintln!("Failed to delete {}: {}", file.display(), e),
             }
         })
@@ -44,6 +52,7 @@ async fn delete_files<P: AsRef<Path>>(pattern: P) -> Result<(), Box<dyn std::err
     // Wait for all delete tasks to finish
     try_join_all(delete_futures).await?;
 
+    pb.finish_with_message("Deletion complete!");
     Ok(())
 }
 
@@ -65,7 +74,7 @@ fn find_files_by_pattern(pattern: &str) -> Result<Vec<PathBuf>, Box<dyn std::err
     Ok(files)
 }
 
-fn delete_file(file: &Path) -> Result<(), Box<dyn std::error::Error>> {
+async fn delete_file(file: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut attempt = 0;
 
     loop {
@@ -73,9 +82,9 @@ fn delete_file(file: &Path) -> Result<(), Box<dyn std::error::Error>> {
         match fs::remove_file(file) {
             Ok(_) => return Ok(()),
             Err(e) if attempt < 3 => {
-                // Retry logic if file removal fails
+                // Retry logic with exponential backoff if file removal fails
                 eprintln!("Attempt {}: Failed to delete file {}: {}. Retrying...", attempt, file.display(), e);
-                std::thread::sleep(std::time::Duration::from_secs(1));  // Sleep before retrying
+                tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(attempt as u32))).await;  // Exponential backoff
             },
             Err(e) => {
                 // Permanent failure after retries
