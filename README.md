@@ -31,3 +31,5 @@ del "<pattern>"
 ```
 
 Replace `<pattern>` with the glob pattern (e.g., `*.log` to delete all `.log` files).
+
+Make sure to add the "./" if you installed via binary download.
