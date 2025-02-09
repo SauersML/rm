@@ -142,7 +142,7 @@ mod benchmarks {
     async fn benchmark_large_number_small_files() {
         let temp_dir = tempdir().unwrap();
         let base_dir_path = temp_dir.path().to_path_buf();
-        let num_files = 5000; // Large number of files
+        let num_files = 50000; // Large number of files
         let file_size_kb = 1;    // Small file size
 
         create_files(&base_dir_path, num_files, file_size_kb);
@@ -173,7 +173,7 @@ mod benchmarks {
     async fn benchmark_small_number_large_files() {
         let temp_dir = tempdir().unwrap();
         let base_dir_path = temp_dir.path().to_path_buf();
-        let num_files = 100;   // Small number of files
+        let num_files = 1000;   // Small number of files
         let file_size_kb = 10240; // Large file size (10MB)
 
         create_files(&base_dir_path, num_files, file_size_kb);
