@@ -100,7 +100,7 @@ async fn delete_file(file: &Path) -> Result<(), Box<dyn std::error::Error>> {
 mod benchmarks {
     use super::*;
     use tempfile::tempdir;
-    use std::fs::{File, create_dir_all};
+    use std::fs::{File};
     use std::io::Write;
     use std::path::PathBuf;
     use std::time::{Instant};
