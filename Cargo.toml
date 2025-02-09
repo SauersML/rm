@@ -2,6 +2,12 @@
 name = "rm"
 version = "0.1.0"
 edition = "2021"
+description = "A simple crate for removing files in a secure and efficient manner."
+license = "MIT"
+repository = "https://github.com/SauersML/rm"
+homepage = "https://github.com/SauersML/rm"
+documentation = "https://github.com/SauersML/rm"
+readme = "README.md"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
