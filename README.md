@@ -19,7 +19,7 @@ cargo install del
 
 Or download the binary directly:
 ```
-wget https://github.com/SauersML/rm/releases/download/v0.1.1/del-x86_64-unknown-linux-gnu.tar.gz && tar -xvzf del-x86_64-unknown-linux-gnu.tar.gz && chmod +x del"
+wget https://github.com/SauersML/rm/releases/download/v0.1.1/del-x86_64-unknown-linux-gnu.tar.gz && tar -xvzf del-x86_64-unknown-linux-gnu.tar.gz && chmod +x del
 ```
 
 ## Usage
