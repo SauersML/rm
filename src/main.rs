@@ -94,3 +94,105 @@ async fn delete_file(file: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 }
+
+
+#[cfg(test)]
+mod benchmarks {
+    use super::*;
+    use tempfile::tempdir;
+    use std::fs::{File, create_dir_all};
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::{Instant};
+    use std::process::Command;
+
+    // Helper function to create test files
+    fn create_files(base_dir: &PathBuf, num_files: usize, file_size_kb: usize) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for i in 0..num_files {
+            let file_path = base_dir.join(format!("test_file_{}.txt", i));
+            let mut file = File::create(&file_path).unwrap();
+            file.write_all(vec![0u8; file_size_kb * 1024].as_slice()).unwrap(); // Create file with specified size
+            files.push(file_path);
+        }
+        files
+    }
+
+    // Helper function to run the Rust delete function and measure time
+    async fn run_rust_delete(pattern: &str) -> std::time::Duration {
+        let start_time = Instant::now();
+        delete_files(pattern).await.unwrap();
+        start_time.elapsed()
+    }
+
+    // Helper function to run the 'rm' command and measure time
+    fn run_rm_command(pattern: &str) -> std::time::Duration {
+        let start_time = Instant::now();
+        Command::new("rm")
+            .arg("-rf") // -rf for recursive and force delete (like our script)
+            .arg(pattern)
+            .output()
+            .expect("Failed to execute rm command");
+        start_time.elapsed()
+    }
+
+
+    #[tokio::test]
+    async fn benchmark_large_number_small_files() {
+        let temp_dir = tempdir().unwrap();
+        let base_dir_path = temp_dir.path().to_path_buf();
+        let num_files = 5000; // Large number of files
+        let file_size_kb = 1;    // Small file size
+
+        create_files(&base_dir_path, num_files, file_size_kb);
+        let pattern = base_dir_path.join("test_file_*.txt").to_string_lossy().to_string();
+
+        println!("Benchmark: Deleting {} small files ({}KB each)", num_files, file_size_kb);
+
+        let rust_duration = run_rust_delete(&pattern).await;
+        println!("Rust Deletion Time: {:?}", rust_duration);
+
+        // Re-create files for rm benchmark (rm is destructive)
+        create_files(&base_dir_path, num_files, file_size_kb);
+        let rm_duration = run_rm_command(&pattern);
+        println!("rm Command Deletion Time: {:?}", rm_duration);
+
+        println!("Comparison:");
+        if rust_duration < rm_duration {
+            println!("del is faster than 'rm' by {:?}", rm_duration - rust_duration);
+        } else {
+            println!("'rm' command is faster than del by {:?}", rm_duration - rust_duration);
+        }
+        println!("---");
+    }
+
+
+    #[tokio::test]
+    async fn benchmark_small_number_large_files() {
+        let temp_dir = tempdir().unwrap();
+        let base_dir_path = temp_dir.path().to_path_buf();
+        let num_files = 100;   // Small number of files
+        let file_size_kb = 10240; // Large file size (10MB)
+
+        create_files(&base_dir_path, num_files, file_size_kb);
+        let pattern = base_dir_path.join("test_file_*.txt").to_string_lossy().to_string();
+
+        println!("Benchmark: Deleting {} large files ({}KB each)", num_files, file_size_kb);
+
+        let rust_duration = run_rust_delete(&pattern).await;
+        println!("Rust Deletion Time: {:?}", rust_duration);
+
+        // Re-create files for rm benchmark (rm is destructive)
+        create_files(&base_dir_path, num_files, file_size_kb);
+        let rm_duration = run_rm_command(&pattern);
+        println!("rm Command Deletion Time: {:?}", rm_duration);
+
+        println!("Comparison:");
+        if rust_duration < rm_duration {
+            println!("del is faster than 'rm' by {:?}", rm_duration - rust_duration);
+        } else {
+            println!("'rm' command is faster than del by {:?}", rm_duration - rust_duration);
+        }
+        println!("---");
+    }
+}
