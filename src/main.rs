@@ -2,7 +2,7 @@ use std::{
     env,
     ffi::CString,
     io,
-    path::{Path, PathBuf},
+    path::{Path},
     sync::atomic::{AtomicUsize, Ordering},
     sync::Arc,
 };
@@ -12,6 +12,7 @@ use glob::glob;
 use indicatif::{ProgressBar, ProgressStyle};
 use once_cell::sync::Lazy;
 use tokio::runtime::Builder;
+use std::os::unix::ffi::OsStrExt; 
 
 /// Delete a single file via a direct `unlink` (libc) call,
 /// bypassing extra overhead from standard library functions.
