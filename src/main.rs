@@ -199,3 +199,5 @@ mod benchmarks {
         println!("---");
     }
 }
+
+// cargo test --release -- --nocapture
