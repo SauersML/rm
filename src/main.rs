@@ -10,7 +10,6 @@ use std::{
 use futures::{stream, StreamExt};
 use glob::glob;
 use indicatif::{ProgressBar, ProgressStyle};
-use once_cell::sync::Lazy;
 use tokio::runtime::Builder;
 use std::os::unix::ffi::OsStrExt; 
 
