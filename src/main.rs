@@ -956,7 +956,7 @@ mod test_prediction {
     }
 }
 
-// cargo test --release -- --nocapture test_model_prediction_accuracy
+// cargo test --release -- --nocapture test_grid
 #[cfg(test)]
 mod test_grid {
     use super::*;
