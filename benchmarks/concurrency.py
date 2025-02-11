@@ -71,8 +71,11 @@ def main():
     # =============================================================================
     # Plot 4: Linear model predicting TotalTime(ns) using our improved model.
     # =============================================================================
-    # Create new features in log-space
-    df['log_NumFiles'] = np.log(df['NumFiles'])
+    # Drop rows with non-positive values for Concurrency, SimulatedCPUs, or TotalTime(ns)
+    df = df[(df['Concurrency'] > 0) & (df['SimulatedCPUs'] > 0) & (df['TotalTime(ns)'] > 0)]
+
+    # Create new features in log-space, using a shift for NumFiles to handle zero values
+    df['log_NumFiles'] = np.log(df['NumFiles'] + 1)
     df['log_Concurrency'] = np.log(df['Concurrency'])
     df['log_SimulatedCPUs'] = np.log(df['SimulatedCPUs'])
     df['log_Concurrency_sq'] = df['log_Concurrency'] ** 2
