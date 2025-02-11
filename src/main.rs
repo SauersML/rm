@@ -104,11 +104,11 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
     );
 
     // Set up progress bar using progression (updates throttled to 250 ms max)
-    let config = progression::Config {
+    let config = Config {
         throttle_millis: 250,
         ..Default::default()
     };
-    let pb = Arc::new(progression::Bar::new(total_files as u64, config));
+    let pb = Arc::new(Bar::new(total_files as u64, config));
 
     // Delete files with controlled concurrency
     let completed_counter = Arc::new(AtomicUsize::new(0));
