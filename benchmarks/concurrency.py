@@ -9,6 +9,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import cross_val_score
 from sklearn.model_selection import train_test_split
 from matplotlib.colors import LinearSegmentedColormap
+from sklearn.decomposition import PCA
 
 def main():
     # =============================================================================
@@ -251,14 +252,10 @@ def main():
     optimal_mask = df.index.isin(optimal_idx)
     non_optimal_mask = ~optimal_mask
     
-    # For non-optimal points, compute the log-scaled TotalTime(ns)
+    # For non-optimal points, compute the log-scaled TotalTime(ns) for color normalization
     non_optimal_total_time = df.loc[non_optimal_mask, 'TotalTime(ns)']
     log_non_optimal_time = np.log(non_optimal_total_time)
-    
-    # Normalize the log-scaled TotalTime(ns) values to [0, 1] for the colormap
     norm = (log_non_optimal_time - log_non_optimal_time.min()) / (log_non_optimal_time.max() - log_non_optimal_time.min())
-    
-    # Create a custom colormap gradient from orange-yellow to blue
     custom_cmap = LinearSegmentedColormap.from_list('custom_cmap', ['orange', 'yellow', 'blue'])
     non_optimal_colors = custom_cmap(norm)
     
@@ -278,14 +275,47 @@ def main():
                df.loc[optimal_mask, 'log_NumFiles'],
                c='red', marker='o', label='Optimal (Lowest TotalTime)')
     
+    # ---- Regression Model for Optimal Concurrency ----
+    # We want to predict log_Concurrency based on log_SimulatedCPUs and log_NumFiles using the optimal points.
+    optimal_data = df.loc[optimal_mask]
+    X = optimal_data[['log_SimulatedCPUs', 'log_NumFiles']]
+    y = optimal_data['log_Concurrency']
+    
+    # Add constant term for the intercept
+    X = sm.add_constant(X)
+    model = sm.OLS(y, X).fit()
+    print(model.summary())
+    
+    # To draw a line in the 3D plot, we fix log_NumFiles at its median value among optimal points.
+    fixed_log_NumFiles = optimal_data['log_NumFiles'].median()
+    
+    # Generate a range of log_SimulatedCPUs values over the observed span in optimal data.
+    log_SimulatedCPUs_range = np.linspace(optimal_data['log_SimulatedCPUs'].min(),
+                                            optimal_data['log_SimulatedCPUs'].max(), 100)
+    
+    # Create a DataFrame for predictions, holding log_NumFiles fixed.
+    X_pred = pd.DataFrame({
+        'const': 1,
+        'log_SimulatedCPUs': log_SimulatedCPUs_range,
+        'log_NumFiles': fixed_log_NumFiles
+    })
+    predicted_log_Concurrency = model.predict(X_pred)
+    
+    # The line will have:
+    # x-axis: log_SimulatedCPUs_range
+    # y-axis: predicted log_Concurrency values
+    # z-axis: fixed_log_NumFiles (constant)
+    ax.plot(log_SimulatedCPUs_range, predicted_log_Concurrency,
+            np.full_like(log_SimulatedCPUs_range, fixed_log_NumFiles),
+            color='green', linewidth=2, label='Best Fit Line for log(Concurrency)')
+    
     ax.set_xlabel("log(SimulatedCPUs)")
     ax.set_ylabel("log(Concurrency)")
     ax.set_zlabel("log(NumFiles)")
-    ax.set_title("3D Scatter: Log-Transformed Axes with Optimal Points Highlighted")
+    ax.set_title("3D Scatter: Log-Transformed Axes with Optimal Points & Regression Line")
     ax.legend()
     plt.tight_layout()
     plt.show()
-
 
 if __name__ == '__main__':
     main()
