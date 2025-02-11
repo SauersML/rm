@@ -21,4 +21,4 @@ num_cpus = "1.16.0"
 rand = "0.9.0"
 ndarray = "0.16.1"
 argmin = "0.10.0"
-argmin-math = "0.4.0"
+argmin-math   = { version = "0.4.0", features = ["ndarray_latest"] }
