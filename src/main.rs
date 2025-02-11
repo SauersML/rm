@@ -386,7 +386,6 @@ mod empirical_tests {
     use argmin::core::{Error, Executor, CostFunction};
     use argmin::solver::quasinewton::BFGS;
     use ndarray::Array1;
-    use argmin::core::{ArgminSub, ArgminDot};
 
     const TEST_FILE_SIZE_KB: usize = 1;
     const TEST_FILE_COUNT: usize = 100;
@@ -605,7 +604,7 @@ mod empirical_tests {
         }
 
         // Optimization Problem Setup (Argmin)
-        let cost_function = DiskEfficiencyFunc;
+        let cost_function = DiskEfficiencyFunc { n_data: n_data.clone(), f_disk_data: f_disk_data.clone() };
         let initial_params = Array1::from_vec(vec![0.01, 1.0]); // Initial guess: for convergence
         let solver = BFGS::new(argmin::solver::linesearch::MoreThuenteLineSearch::new());
 
