@@ -742,7 +742,6 @@ mod test_grid {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
-    use rand::{Rng, thread_rng};
     use std::fs::OpenOptions;
     use std::io::BufWriter;
 
