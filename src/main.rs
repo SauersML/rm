@@ -381,11 +381,11 @@ mod empirical_tests {
     use std::path::PathBuf;
     use std::time::{Instant, Duration};
     use tempfile::tempdir;
-    use rand::{Rng, thread_rng};
     use std::iter;
     use argmin::core::{Error, Executor, CostFunction};
     use argmin::solver::quasinewton::BFGS;
     use ndarray::Array1;
+    use argmin_math::*;
 
     const TEST_FILE_SIZE_KB: usize = 1;
     const TEST_FILE_COUNT: usize = 100;
@@ -492,15 +492,13 @@ mod empirical_tests {
             .enable_all()
             .build()
             .unwrap();
-
+    
         runtime.block_on(async {
-            let futures: Vec<_> = files.iter().map(|path| {
-                let path_clone = path.clone();
-                tokio::spawn(async move {
-                    unlink_file(&path_clone).unwrap();
+            futures::stream::iter(files)
+                .for_each_concurrent(Some(n), |path| async move {
+                    unlink_file(&path).unwrap();
                 })
-            }).collect();
-            futures::future::join_all(futures).await;
+                .await;
         });
         start.elapsed()
     }
