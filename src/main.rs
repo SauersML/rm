@@ -195,7 +195,7 @@ mod performance_tests {
         let start = Instant::now();
         // We create a fresh Tokio runtime to run `run_deletion`
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
-        let result = rt.block_on(run_deletion(pattern));
+        let result = rt.block_on(run_deletion(pattern, None));
         let elapsed = start.elapsed().as_secs_f64();
 
         if let Err(e) = result {
