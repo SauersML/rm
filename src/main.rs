@@ -659,6 +659,7 @@ mod empirical_tests {
 
 }
 
+// cargo test --release -- --nocapture test_model_prediction_accuracy
 #[cfg(test)]
 mod test_prediction {
     use super::*;
@@ -890,7 +891,7 @@ mod test_prediction {
         fn color_for_concurrency(n: usize) -> plotters::prelude::RGBColor {
             // Normalize the concurrency level to a value between 0.0 and 1.0.
             // Here we assume a maximum of 128 cores.
-            let t = (n as f64 / 128.0).min(1.0);
+            let t = (n as f64 / num_cpus::get() as f64).min(1.0);
             // Interpolate between blue (for low values) and red (for high values).
             let r = (t * 255.0).round() as u8;
             let b = ((1.0 - t) * 255.0).round() as u8;
