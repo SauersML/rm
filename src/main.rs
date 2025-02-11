@@ -143,7 +143,11 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
         })
         .await;
 
-    Arc::try_unwrap(pb).unwrap().finish();
+    match Arc::try_unwrap(pb) {
+        Ok(bar_inner) => { bar_inner.finish(); },
+        Err(arc) => { drop(arc); },
+    }
+
     Ok(())
 }
 
