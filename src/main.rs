@@ -893,8 +893,8 @@ mod test_prediction {
         ];
     
         // Plot each group using a distinct color.
-        for (i, (&concurrency, points)) in groups.iter().enumerate() {
-            let color = palette[i % palette.len()];
+        for (&concurrency, points) in groups.iter() {
+            let color = color_for_concurrency(concurrency);
             chart2
                 .draw_series(
                     points.iter().map(|&(files, time)| {
