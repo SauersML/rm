@@ -854,36 +854,42 @@ mod test_prediction {
             correlation_coefficient
         );
     
-        // --- Plot 2: Concurrency vs. Actual Deletion Time ---
-        // We generate 32 values of concurrency in logspace between 64 * num_cpus() and 1.
+        // --- Plot 2: Number of Files vs Actual Deletion Time (Scatterplot with Concurrency as Color) ---
+        // Generate 32 concurrency values in logspace between 1×CPUs and 64×CPUs.
         let cpu: f64 = num_cpus::get() as f64;
-        let max_concurrency: f64 = 64.0 * cpu; // maximum concurrency value
-        let min_concurrency: f64 = 1.0;        // minimum concurrency value
-        let num_points: usize = 32;            // total points in logspace
+        let min_concurrency: f64 = cpu;         // minimum concurrency = 1×CPUs
+        let max_concurrency: f64 = 64.0 * cpu;  // maximum concurrency = 64×CPUs
+        let num_points: usize = 32;             // total of 32 points in logspace
         
         // Compute log10-space endpoints.
         let log_min: f64 = min_concurrency.log10();
         let log_max: f64 = max_concurrency.log10();
         
-        // Generate 32 concurrency values (in descending order).
+        // Generate 32 concurrency values (in ascending order).
         let concurrencies: Vec<usize> = (0..num_points)
             .map(|i: usize| {
                 let t: f64 = i as f64 / (num_points as f64 - 1.0);
-                let log_val: f64 = log_max + t * (log_min - log_max); // interpolates from log_max to log_min
+                let log_val: f64 = log_min + t * (log_max - log_min); // interpolate from log_min to log_max
                 let val: f64 = 10f64.powf(log_val);
                 let rounded: usize = val.round() as usize;
                 if rounded < 1 { 1 } else { rounded }
             })
             .collect();
-
-        // Use a fixed file count for each measurement.
-        let file_count = 1000;
-        let iterations = 5; // average over 5 runs per concurrency value
-        let mut concurrency_values = Vec::new();
-        let mut avg_times = Vec::new();
-
+        
+        // For each concurrency value, run one scenario with a random file count (between 1 and 10,000)
+        // and measure the actual deletion time (averaged over a few iterations).
+        let iterations: usize = 3; // average over 3 runs per concurrency value
+        let mut file_counts: Vec<usize> = Vec::new();
+        let mut avg_times: Vec<f64> = Vec::new();
+        let mut concurrency_used: Vec<usize> = Vec::new();
+        
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        
         for &n in &concurrencies {
-            let mut total_time = 0.0;
+            // Random file count between 1 and 10,000.
+            let file_count: usize = rng.gen_range(1..=10_000);
+            let mut total_time: f64 = 0.0;
             for _ in 0..iterations {
                 // Create a temporary directory and generate test files.
                 let tmp_dir = tempfile::tempdir().unwrap();
@@ -891,78 +897,58 @@ mod test_prediction {
                 let duration = measure_concurrent_deletion_time(n, files);
                 total_time += duration.as_nanos() as f64 / 1_000_000.0; // convert ns to ms
             }
-            let avg_time = total_time / iterations as f64;
-            concurrency_values.push(n as f64);
+            let avg_time: f64 = total_time / iterations as f64;
+            file_counts.push(file_count);
             avg_times.push(avg_time);
+            concurrency_used.push(n);
         }
-
-        // Now produce the plot.
-        // We’ll plot with a log-scale on the x-axis.
-        // Transform x-values to log10(concurrency) for plotting.
-        let x_min = concurrency_values
-            .iter()
-            .map(|&x| x.log10())
-            .fold(f64::INFINITY, f64::min);
-        let x_max = concurrency_values
-            .iter()
-            .map(|&x| x.log10())
-            .fold(f64::NEG_INFINITY, f64::max);
-        let max_time = avg_times.iter().cloned().fold(0.0, f64::max);
-
-        let root2 = BitMapBackend::new("concurrency_vs_actual.png", (1024, 768))
+        
+        // Helper: map a concurrency value to a color on a blue-to-red gradient.
+        // The minimum (min_concurrency) maps to blue, the maximum (max_concurrency) maps to red.
+        fn color_for_concurrency_val(n: usize, min: f64, max: f64) -> plotters::prelude::RGBColor {
+            let n_f: f64 = n as f64;
+            let t: f64 = (n_f - min) / (max - min);
+            let r: u8 = (t * 255.0).round() as u8;
+            let b: u8 = ((1.0 - t) * 255.0).round() as u8;
+            plotters::prelude::RGBColor(r, 0, b)
+        }
+        
+        // Determine the x and y ranges.
+        let x_max: usize = file_counts.iter().cloned().max().unwrap_or(10_000);
+        let y_max: f64 = avg_times.iter().cloned().fold(0.0, f64::max);
+        
+        // Build the scatterplot.
+        // X axis: Number of Files, Y axis: Actual Deletion Time (ms)
+        let root2 = BitMapBackend::new("files_vs_time.png", (1024, 768))
             .into_drawing_area();
         root2.fill(&WHITE).unwrap();
-
+        
         let mut chart2 = ChartBuilder::on(&root2)
-            .caption("Concurrency vs Actual Deletion Time", ("sans-serif", 50).into_font())
+            .caption("Number of Files vs Actual Deletion Time", ("sans-serif", 50).into_font())
             .margin(5)
             .x_label_area_size(60)
             .y_label_area_size(60)
-            .build_cartesian_2d(x_min..x_max, 0.0..max_time)
+            .build_cartesian_2d(0..(x_max + 100), 0.0..(y_max * 1.1))
             .unwrap();
-
-        chart2
-            .configure_mesh()
-            .x_desc("Concurrency (log scale)")
+        
+        chart2.configure_mesh()
+            .x_desc("Number of Files")
             .y_desc("Actual Deletion Time (ms)")
-            .x_labels(10)
-            .x_label_formatter(&|x| format!("{:.0}", 10f64.powf(*x)))
             .draw()
             .unwrap();
-
-        // Plot the average deletion time as a line with points.
-        chart2
-            .draw_series(LineSeries::new(
-                concurrency_values
-                    .iter()
-                    .zip(avg_times.iter())
-                    .map(|(&n, &time)| (n.log10(), time)),
-                &BLUE,
+        
+        // Draw each scenario as a scatter point, colored according to its concurrency.
+        for i in 0..file_counts.len() {
+            let color = color_for_concurrency_val(concurrency_used[i], min_concurrency, max_concurrency);
+            chart2.draw_series(std::iter::once(
+                Circle::new((file_counts[i] as i32, avg_times[i]), 5, color.filled()),
             ))
-            .unwrap()
-            .label("Avg Deletion Time")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLUE));
-
-        chart2
-            .draw_series(
-                concurrency_values
-                    .iter()
-                    .zip(avg_times.iter())
-                    .map(|(&n, &time)| {
-                        Circle::new((n.log10(), time), 5, BLUE.filled())
-                    }),
-            )
             .unwrap();
-
-        chart2
-            .configure_series_labels()
-            .border_style(&BLACK)
-            .background_style(&WHITE.mix(0.8))
-            .draw()
-            .unwrap();
-
+        }
+        
         root2.present().unwrap();
-        println!("Plot saved to concurrency_vs_actual.png");
+        println!("Scatter plot saved to files_vs_time.png");
+
     }
 }
 
