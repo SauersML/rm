@@ -886,11 +886,17 @@ mod test_prediction {
             .y_desc("Actual Time (ms)")
             .draw()
             .unwrap();
-    
-        // Define a palette of colors for different concurrency levels.
-        let palette = vec![
-            &BLUE, &RED, &GREEN, &CYAN, &MAGENTA, &YELLOW, &BLACK, &RGBColor(128, 0, 128),
-        ];
+
+        fn color_for_concurrency(n: usize) -> plotters::prelude::RGBColor {
+            // Normalize the concurrency level to a value between 0.0 and 1.0.
+            // Here we assume a maximum of 128 cores.
+            let t = (n as f64 / 128.0).min(1.0);
+            // Interpolate between blue (for low values) and red (for high values).
+            let r = (t * 255.0).round() as u8;
+            let b = ((1.0 - t) * 255.0).round() as u8;
+            // Green channel is fixed at 0.
+            plotters::prelude::RGBColor(r, 0, b)
+        }
     
         // Plot each group using a distinct color.
         for (&concurrency, points) in groups.iter() {
