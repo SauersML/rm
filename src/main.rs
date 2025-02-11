@@ -941,7 +941,7 @@ mod test_prediction {
         for i in 0..file_counts.len() {
             let color = color_for_concurrency_val(concurrency_used[i], min_concurrency, max_concurrency);
             chart2.draw_series(std::iter::once(
-                Circle::new((file_counts[i] as i32, avg_times[i]), 5, color.filled()),
+                Circle::new((file_counts[i], avg_times[i]), 5, color.filled()),
             ))
             .unwrap();
         }
