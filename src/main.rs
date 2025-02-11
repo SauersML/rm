@@ -496,7 +496,11 @@ mod empirical_tests {
         runtime.block_on(async {
             futures::stream::iter(files)
                 .for_each_concurrent(Some(n), |path| async move {
-                    unlink_file(&path).unwrap();
+                    if let Err(e) = unlink_file(&path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            panic!("Failed to delete '{}': {}", path.display(), e);
+                        }
+                    }
                 })
                 .await;
         });
@@ -527,7 +531,7 @@ mod empirical_tests {
         for &concurrency in &concurrency_levels {
             let mut total_deletion_time = Duration::new(0, 0);
             for _ in 0..ITERATIONS {
-                let files = base_files.clone();  // Use cloned file set each iteration.
+                let files = create_files_for_measurement(tmp_dir.path());
                 total_deletion_time += measure_concurrent_deletion_time(concurrency, files);
             }
             let avg_total_deletion_time_ns = total_deletion_time.as_nanos() / ITERATIONS as u128;
