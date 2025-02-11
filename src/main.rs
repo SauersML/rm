@@ -19,9 +19,12 @@ use std::os::unix::ffi::OsStrExt;
 
 // ===========================
 // HARDCODED CONSTANTS (from empirical tests):
-const T_CONVERSION_NS: f64 = 500.0;  // Adjust later... actually use this
-const T_SYSCALL_NS: f64 = 1000.0; // Adjust later
-const T_OVERHEAD_NS: f64 = 170.0;  // Adjust later
+const T_CONVERSION_NS: f64 = 116.56;
+const T_SYSCALL_NS: f64 = 113356.65;
+const T_OVERHEAD_NS: f64 = 16538.87;
+const F_DISK_A_FIT: f64 = 0.31238476;
+const F_DISK_B_FIT: f64 = 1.20621366;
+// ===========================
 
 
 /// Delete a single file via a direct `unlink` (libc) call.
