@@ -691,7 +691,7 @@ mod test_prediction {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
-    use rand::{Rng, thread_rng};
+    use rand::{thread_rng};
     use plotters::prelude::*;
     use statrs::statistics::Statistics;
 
@@ -705,7 +705,6 @@ mod test_prediction {
     // ===========================
 
     const TEST_FILE_SIZE_KB: usize = 1;
-    const NUM_TEST_FILES: usize = 100;
     const NUMBER_OF_SCENARIOS: usize = 500;
 
     /// Creates a set of test files in the given directory.
@@ -1033,7 +1032,7 @@ mod test_grid {
     #[test]
     fn test_grid_search() {
         let actual_cpus = num_cpus::get();
-        let mut simulated_cpu_counts = generate_log_space(actual_cpus, 32);
+        let simulated_cpu_counts = generate_log_space(actual_cpus, 32);
         let file_counts = [0, 8, 40, 80, 400, 2000];
         let max_concurrency_multiplier = 4;
         println!("\n[Grid Search Test] Running...");
