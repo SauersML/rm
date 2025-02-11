@@ -241,33 +241,36 @@ def main():
     # Load the data again
     df = pd.read_csv('test_results.csv')
     
-    # Log-transform the variables for the axes (add 1 to NumFiles in case of zeros)
+    # Log-transform the axes variables (add 1 to NumFiles to handle zeros)
     df['log_SimulatedCPUs'] = np.log(df['SimulatedCPUs'])
     df['log_Concurrency']    = np.log(df['Concurrency'])
     df['log_NumFiles']       = np.log(df['NumFiles'] + 1)
     
-    # Identify optimal points: for each (SimulatedCPUs, NumFiles) pair, select the row with minimum TotalTime(ns)
+    # Identify optimal points: for each (SimulatedCPUs, NumFiles) pair, select the row with the minimum TotalTime(ns)
     optimal_idx = df.groupby(['SimulatedCPUs', 'NumFiles'])['TotalTime(ns)'].idxmin()
     optimal_mask = df.index.isin(optimal_idx)
     non_optimal_mask = ~optimal_mask
     
-    # Create a custom colormap for non-optimal points (gradient from orange-yellow to blue)
-    custom_cmap = LinearSegmentedColormap.from_list('custom_cmap', ['orange', 'yellow', 'blue'])
+    # For non-optimal points, compute the log-scaled TotalTime(ns)
+    non_optimal_total_time = df.loc[non_optimal_mask, 'TotalTime(ns)']
+    log_non_optimal_time = np.log(non_optimal_total_time)
     
-    # Normalize TotalTime(ns) for non-optimal points to [0, 1]
-    non_optimal_times = df.loc[non_optimal_mask, 'TotalTime(ns)']
-    norm = (non_optimal_times - non_optimal_times.min()) / (non_optimal_times.max() - non_optimal_times.min())
+    # Normalize the log-scaled TotalTime(ns) values to [0, 1] for the colormap
+    norm = (log_non_optimal_time - log_non_optimal_time.min()) / (log_non_optimal_time.max() - log_non_optimal_time.min())
+    
+    # Create a custom colormap gradient from orange-yellow to blue
+    custom_cmap = LinearSegmentedColormap.from_list('custom_cmap', ['orange', 'yellow', 'blue'])
     non_optimal_colors = custom_cmap(norm)
     
-    # Create the 3D scatter plot using log-transformed values
+    # Create the 3D scatter plot using the log-transformed variables
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
     
-    # Plot non-optimal points with gradient colors
+    # Plot non-optimal points with gradient colors and alpha = 0.1
     ax.scatter(df.loc[non_optimal_mask, 'log_SimulatedCPUs'],
                df.loc[non_optimal_mask, 'log_Concurrency'],
                df.loc[non_optimal_mask, 'log_NumFiles'],
-               c=non_optimal_colors, marker='o', label='Non-Optimal')
+               c=non_optimal_colors, marker='o', alpha=0.1, label='Non-Optimal')
     
     # Plot optimal points in red
     ax.scatter(df.loc[optimal_mask, 'log_SimulatedCPUs'],
