@@ -755,7 +755,7 @@ mod test_prediction {
         // then measure predicted and actual deletion times.
         for _ in 0..NUMBER_OF_SCENARIOS {
             // Generate random concurrency level and number of files.
-            let n = thread_rng().gen_range(1..=16*num_cpus::get());
+            let n = thread_rng().gen_range(1..=64*num_cpus::get());
             let num_files = thread_rng().gen_range(1..=1000);
             concurrency_levels.push(n);
             file_counts.push(num_files);
@@ -890,8 +890,7 @@ mod test_prediction {
 
         fn color_for_concurrency(n: usize) -> plotters::prelude::RGBColor {
             // Normalize the concurrency level to a value between 0.0 and 1.0.
-            // Here we assume a maximum of 128 cores.
-            let t = (n as f64 / num_cpus::get() as f64).min(1.0);
+            let t = (n as f64 / 64*num_cpus::get() as f64).min(1.0);
             // Interpolate between blue (for low values) and red (for high values).
             let r = (t * 255.0).round() as u8;
             let b = ((1.0 - t) * 255.0).round() as u8;
