@@ -1034,8 +1034,6 @@ mod test_grid {
     fn test_grid_search() {
         let actual_cpus = num_cpus::get();
         let mut simulated_cpu_counts = generate_log_space(actual_cpus, 32);
-        // Reverse the order to walk down from highest to lowest simulated CPUs.
-        simulated_cpu_counts.reverse();
         let file_counts = [0, 8, 40, 80, 400, 2000];
         let max_concurrency_multiplier = 4;
         println!("\n[Grid Search Test] Running...");
