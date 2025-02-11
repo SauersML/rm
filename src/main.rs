@@ -188,7 +188,7 @@ fn main() {
 // ====================================================================================================================================
 
 
-
+// cargo test --release -- --nocapture performance_tests
 #[cfg(test)]
 mod performance_tests {
     use super::*;
@@ -687,8 +687,6 @@ mod test_grid {
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
     use rand::{Rng, thread_rng};
-    use plotters::prelude::*;
-    use plotters::style::colors::{BLACK, WHITE};
     use std::fs::OpenOptions;
     use std::io::BufWriter;
 
@@ -793,61 +791,7 @@ mod test_grid {
                 );
             }
         }
-        create_3d_plot(&plot_data).expect("Failed to create 3D plot");
-        println!("[Grid Search Test] Complete.  See optimal_concurrency.png and {}", CSV_FILE_NAME);
-    }
-
-    /// Creates a 3D plot of the optimal concurrency data.
-    fn create_3d_plot(data: &[(f64, f64, f64)]) -> Result<(), Box<dyn std::error::Error>> {
-        let root = BitMapBackend::new("optimal_concurrency.png", (1024, 768)).into_drawing_area();
-        root.fill(&WHITE)?;
-        let max_cpus = data.iter().map(|&(x, _, _)| x).fold(0.0, f64::max);
-        let max_concurrency = data.iter().map(|&(_, y, _)| y).fold(0.0, f64::max);
-        let max_files = data.iter().map(|&(_, _, z)| z).fold(0.0, f64::max);
-        let mut chart = ChartBuilder::on(&root)
-            .margin(5)
-            .x_label_area_size(60)
-            .y_label_area_size(60)
-            .build_cartesian_3d(0.0..max_cpus, 0.0..max_concurrency, 0.0..max_files)?;
-        chart.configure_axes().draw()?;
-        let label_style = ("sans-serif", 20).into_font();
-        chart
-            .draw_series(std::iter::once(Text::new(
-                "Simulated CPUs",
-                (max_cpus + 5.0, 0.0, 0.0),
-                label_style.clone(),
-            )))?
-            .label("Simulated CPUs")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLACK));
-        chart
-            .draw_series(std::iter::once(Text::new(
-                "Optimal Concurrency",
-                (0.0, max_concurrency + 2.5, 0.0),
-                label_style.clone().transform(FontTransform::Rotate90),
-            )))?
-            .label("Optimal Concurrency")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x, y + 20)], &BLACK));
-        chart
-            .draw_series(std::iter::once(Text::new(
-                "Number of Files",
-                (0.0, -7.0, max_files + 1000.0),
-                label_style.clone().transform(FontTransform::Rotate270),
-            )))?
-            .label("Number of Files")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLACK));
-        chart.draw_series(data.iter().map(|&(x, y, z)| {
-            let style = plotters::style::ShapeStyle {
-                color: plotters::style::RGBColor(
-                    (255.0 * y / max_concurrency) as u8,
-                    0,
-                    (255.0 * (1.0 - y / max_concurrency)) as u8,
-                ).into(),
-                filled: true,
-                stroke_width: 1,
-            };
-            Cross::new((x, y, z), 5, style)
-        }))?;
-        Ok(())
+        println!("[Grid Search Test] Complete.  See {}", CSV_FILE_NAME);
     }
 }
 
