@@ -3,25 +3,33 @@ use std::{
     ffi::CString,
     io,
     path::{Path},
-    sync::atomic::{AtomicUsize, Ordering},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use futures::{stream, StreamExt};
 use glob::glob;
 use indicatif::{ProgressBar, ProgressStyle};
+use num_cpus;
 use tokio::runtime::Builder;
-use std::os::unix::ffi::OsStrExt; 
+use std::os::unix::ffi::OsStrExt;
 
-/// Delete a single file via a direct `unlink` (libc) call,
-/// bypassing extra overhead from standard library functions.
-///
-/// For minimal overhead per file.
+
+// ===========================
+// HARDCODED CONSTANTS (from empirical tests):
+const T_CONVERSION_NS: f64 = 500.0;  // Adjust later... actually use this
+const T_SYSCALL_NS: f64 = 1000.0; // Adjust later
+const T_OVERHEAD_NS: f64 = 170.0;  // Adjust later
+
+
+/// Delete a single file via a direct `unlink` (libc) call.
 fn unlink_file(path: &Path) -> io::Result<()> {
     let c_str = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Path contains null byte"))?;
 
-    let ret = unsafe { libc::unlink(c_str.as_ptr()) }; // Unsafe!
+    let ret = unsafe { libc::unlink(c_str.as_ptr()) };
     if ret == 0 {
         Ok(())
     } else {
@@ -29,12 +37,24 @@ fn unlink_file(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Our main async entry point.
-///
-/// 1. Gathers matching file paths (glob).
-/// 2. Filters out non-files (directories, symlinks to dirs, etc.).
-/// 3. Deletes them in parallel.
-/// 4. Displays a minimal-overhead progress bar.
+/// Compute the optimal concurrency level.
+fn compute_optimal_concurrency(num_files: usize, t_syscall_ns: f64, t_overhead_ns: f64) -> usize {
+    if num_files == 0 {
+        return 1;
+    }
+
+    let n_cpus = num_cpus::get();
+
+    // n_opt = sqrt( (N * T_syscall) / T_overhead )
+    let raw_value = ((num_files as f64) * t_syscall_ns / t_overhead_ns).sqrt();
+    let candidate_n = raw_value.round() as usize;
+
+    // Limit concurrency to the number of CPU cores, and make sure it's at least 1.
+    let n_opt = candidate_n.clamp(1, n_cpus);
+    n_opt
+}
+
+/// Main async entry point.
 async fn run_deletion(pattern: &str) -> io::Result<()> {
     // Gather files
     let mut files = Vec::new();
@@ -46,8 +66,6 @@ async fn run_deletion(pattern: &str) -> io::Result<()> {
     })? {
         match entry {
             Ok(path) => {
-                // Only delete if it's truly a file (symlinks to files included,
-                // symlinks to directories and actual directories excluded).
                 if path.is_file() {
                     files.push(path);
                 }
@@ -60,12 +78,20 @@ async fn run_deletion(pattern: &str) -> io::Result<()> {
 
     let total_files = files.len();
     if total_files == 0 {
-        // Nothing to delete. Exit quietly.
         println!("No matching files found for pattern '{}'.", pattern);
         return Ok(());
     }
 
-    // Prepare a progress bar with minimal overhead / flicker
+    // Compute optimal concurrency
+    let concurrency = compute_optimal_concurrency(total_files, T_SYSCALL_NS, T_OVERHEAD_NS);
+    println!(
+        "[INFO] Deleting {} files with concurrency = {} (CPU cores = {})",
+        total_files,
+        concurrency,
+        num_cpus::get()
+    );
+
+    // Set up progress bar
     let pb = ProgressBar::new(total_files as u64);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -73,35 +99,23 @@ async fn run_deletion(pattern: &str) -> io::Result<()> {
             .progress_chars("=>-"),
     );
 
-    // We use an atomic counter for concurrency-safe progress increments.
+    // Delete files with controlled concurrency
     let completed_counter = Arc::new(AtomicUsize::new(0));
-
-    // Delete in parallel with no arbitrary concurrency limit (`None`).
     let file_stream = stream::iter(files.into_iter());
 
     file_stream
-        .for_each_concurrent(None, |path| {
+        .for_each_concurrent(Some(concurrency), |path| {
             let pb = pb.clone();
             let completed_counter = completed_counter.clone();
             async move {
                 match unlink_file(&path) {
                     Ok(_) => {
-                        // One file successfully deleted
                         let done = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                        // Update progress bar
                         pb.set_position(done as u64);
                     }
                     Err(e) => {
-                        // We print the error, but do not abort the entire process
-                        // since the requirement is to delete what we can
-                        // without skipping intended files. If a file is truly locked
-                        // or can't be deleted, we just log it.
-                        eprintln!(
-                            "Failed to delete '{}': {}",
-                            path.display(),
-                            e
-                        );
-                        // Even on error, count it as "handled" so progress remains accurate.
+                        eprintln!("Failed to delete '{}': {}", path.display(), e);
+                        // Still count errors towards completion for accurate progress.
                         let done = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
                         pb.set_position(done as u64);
                     }
@@ -110,21 +124,17 @@ async fn run_deletion(pattern: &str) -> io::Result<()> {
         })
         .await;
 
-    // Mark progress as finished
     pb.finish_with_message("Deletion complete!");
-
     Ok(())
 }
 
-/// Synchronous wrapper around our async function
+/// Synchronous wrapper around the async function.
 fn main() {
-    // Build a dedicated multi-threaded Tokio runtime
-    let runtime = Builder::new_multi_thread()
+    let runtime = Builder::new_multi_thread() // Use a multi-threaded runtime
         .enable_all()
         .build()
         .expect("Failed to build Tokio runtime");
 
-    // Parse CLI arguments
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: {} <pattern>", args[0]);
@@ -134,23 +144,18 @@ fn main() {
 
     let pattern = &args[1];
 
-    // Run deletion
     let result = runtime.block_on(run_deletion(pattern));
 
-    // Print final message or error
     match result {
-        Ok(_) => {
-            println!(
-                "Files matching the pattern '{}' have been deleted successfully!",
-                pattern
-            );
-        }
+        Ok(_) => println!("Files matching '{}' deleted successfully!", pattern),
         Err(e) => {
             eprintln!("Error during deletion: {}", e);
             std::process::exit(1);
         }
     }
 }
+
+
 
 #[cfg(test)]
 mod tests {
