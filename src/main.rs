@@ -385,7 +385,8 @@ mod empirical_tests {
     use std::iter;
     use argmin::core::{Error, Executor, CostFunction};
     use argmin::solver::quasinewton::BFGS;
-    use ndarray::{Array1, ArrayView1};
+    use ndarray::Array1;
+    use argmin::core::{ArgminSub, ArgminDot};
 
     const TEST_FILE_SIZE_KB: usize = 1;
     const TEST_FILE_COUNT: usize = 100;
@@ -415,7 +416,7 @@ mod empirical_tests {
 
     fn measure_path_conversion_time_inner() -> f64 {
         const ITERS: usize = 10_000;
-        let path_str: String = format!("/tmp/long_path_for_conversion/dir1/dir2/file_{}.dat",  iter::repeat(0).take(20).map(|_| thread_rng().sample(Alphanumeric).to_string()).collect::<String>());
+        let path_str: String = format!("/tmp/long_path_for_conversion/dir1/dir2/file_{}.dat",  iter::repeat(0).take(20).map(|_| "A".to_string()).collect::<String>());
         let mut total_ns = 0u128;
 
         for _ in 0..ITERS {
@@ -560,41 +561,60 @@ mod empirical_tests {
         let n_data: Array1<f64> = f_disk_data_vec.iter().map(|&(n, _)| n).collect();
         let f_disk_data: Array1<f64> = f_disk_data_vec.iter().map(|&(_, f_disk)| f_disk).collect();
 
-        // Define the Rational Function Model (Same as Before)
+        // Define the Rational Function Model
         #[derive(Clone)]
-        struct DiskEfficiencyFunc;
-
+        struct DiskEfficiencyFunc {
+            n_data: Array1<f64>,
+            f_disk_data: Array1<f64>,
+        }
         impl CostFunction for DiskEfficiencyFunc {
             type Param = Array1<f64>;
             type Output = f64;
-
+        
             fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
                 let a = p[0];
                 let b = p[1];
                 let mut sum_squared_errors = 0.0;
-
-                for i in 0..n_data.len() {
-                    let n_val = n_data[i];
-                    let empirical_f_disk = f_disk_data[i];
+        
+                for i in 0..self.n_data.len() {
+                    let n_val = self.n_data[i];
+                    let empirical_f_disk = self.f_disk_data[i];
                     let predicted_f_disk = 1.0 / (1.0 + a * (n_val.powf(b)));
                     sum_squared_errors += (predicted_f_disk - empirical_f_disk).powi(2);
                 }
                 Ok(sum_squared_errors)
             }
         }
+        
+        impl argmin::core::Gradient for DiskEfficiencyFunc {
+            type Param = Array1<f64>;
+            type Gradient = Array1<f64>;
+        
+            fn gradient(&self, p: &Self::Param) -> Result<Self::Gradient, Error> {
+                let epsilon = 1e-6;
+                let mut grad = p.clone();
+                for i in 0..p.len() {
+                    let mut p_eps = p.clone();
+                    p_eps[i] += epsilon;
+                    let cost1 = self.cost(p)?;
+                    let cost2 = self.cost(&p_eps)?;
+                    grad[i] = (cost2 - cost1) / epsilon;
+                }
+                Ok(grad)
+            }
+        }
 
         // Optimization Problem Setup (Argmin)
         let cost_function = DiskEfficiencyFunc;
         let initial_params = Array1::from_vec(vec![0.01, 1.0]); // Initial guess: for convergence
-        let solver = BFGS::new();
+        let solver = BFGS::new(argmin::solver::linesearch::MoreThuenteLineSearch::new());
 
-        // Run Optimizer (Same as Before)
-        let res = Executor::new(cost_function, solver, initial_params)
-            .max_iters(1000)
+        // Run Optimizer
+        let res = Executor::new(cost_function, solver)
             .run()
-            .unwrap();  // Add error handling in production code
+            .unwrap();
 
-        // Extract Fitted Parameters (Same as Before)
+        // Extract Fitted Parameters
         let best_params = res.state.best_param.clone().unwrap(); // Directly access best_param
         let a_fitted = best_params[0];
         let b_fitted = best_params[1];
