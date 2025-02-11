@@ -1061,7 +1061,12 @@ mod test_grid {
                 let pattern = format!("{}/*", tmp_dir.path().to_string_lossy());
                 let mut min_time = Duration::MAX;
                 let mut optimal_concurrency = 1;
-                for concurrency in 1..=(max_concurrency_multiplier * simulated_cpus) {
+
+                // Generate 32 log-spaced concurrency levels from 1 to max_concurrency
+                let max_concurrency = max_concurrency_multiplier * simulated_cpus;
+                let concurrency_levels = generate_log_space(max_concurrency, 32);
+
+                for concurrency in concurrency_levels {
                     create_test_files(tmp_dir.path(), num_files);
                     let start = Instant::now();
                     runtime.block_on(run_deletion(&pattern, Some(concurrency))).unwrap();
