@@ -158,7 +158,7 @@ fn main() {
 
 
 #[cfg(test)]
-mod tests {
+mod performance_tests {
     use super::*;
     use std::{
         fs::{self, File},
@@ -370,6 +370,242 @@ mod tests {
         assert!(dir_path.is_dir());
         // File should be deleted
         assert!(!file_path.exists(), "File was not deleted!");
+    }
+}
+
+#[cfg(test)]
+mod empirical_tests {
+    use super::*;
+    use std::fs::{File};
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::{Instant, Duration};
+    use tempfile::tempdir;
+    use rand::{Rng, thread_rng};
+    use rand::distributions::Alphanumeric;
+    use std::iter;
+    use argmin::core::{Error, Executor, CostFunction};
+    use argmin::solver::quasinewton::BFGS;
+    use ndarray::{Array1, ArrayView1};
+
+    const TEST_FILE_SIZE_KB: usize = 1;
+    const TEST_FILE_COUNT: usize = 100;
+    const ITERATIONS: usize = 100;
+
+    fn unlink_file(path: &Path) -> io::Result<()> {
+        let c_str = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Path contains null byte"))?;
+        let ret = unsafe { libc::unlink(c_str.as_ptr()) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    fn create_files_for_measurement(dir: &Path) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        for i in 0..TEST_FILE_COUNT {
+            let file_path = dir.join(format!("test_file_{}.dat", i));
+            let mut file = File::create(&file_path).unwrap();
+            file.write_all(&vec![0u8; TEST_FILE_SIZE_KB * 1024]).unwrap();
+            paths.push(file_path);
+        }
+        paths
+    }
+
+    fn measure_path_conversion_time_inner() -> f64 {
+        const ITERS: usize = 10_000;
+        let path_str: String = format!("/tmp/long_path_for_conversion/dir1/dir2/file_{}.dat",  iter::repeat(0).take(20).map(|_| thread_rng().sample(Alphanumeric).to_string()).collect::<String>());
+        let mut total_ns = 0u128;
+
+        for _ in 0..ITERS {
+            let start = Instant::now();
+            let _ = CString::new(&path_str[..]).expect("CString conversion failed");
+            total_ns += start.elapsed().as_nanos();
+        }
+
+        total_ns as f64 / ITERS as f64
+    }
+
+    #[test]
+    fn measure_path_conversion_time() {
+        let avg_ns = measure_path_conversion_time_inner();
+        println!("[Empirical] T_conversion (Path Conversion Time) = {:.2} ns/path", avg_ns);
+        assert!(avg_ns > 0.0);
+    }
+
+    fn measure_syscall_time_inner(files: &Vec<PathBuf>) -> f64 {
+        let mut total_ns = 0u128;
+        for path in files {
+            let start = Instant::now();
+            unlink_file(path).expect("Failed to unlink in test");
+            total_ns += start.elapsed().as_nanos();
+        }
+        total_ns as f64 / files.len() as f64
+    }
+
+    #[test]
+    fn measure_syscall_time() {
+        let tmp_dir = tempdir().unwrap();
+        let base_files = create_files_for_measurement(tmp_dir.path());
+        let avg_syscall_ns = measure_syscall_time_inner(&base_files);
+        println!("[Empirical] T_syscall (System Call Time) = {:.2} ns/file", avg_syscall_ns);
+        assert!(avg_syscall_ns > 0.0);
+    }
+
+    fn measure_task_overhead_inner() -> f64 {
+        const TASKS: usize = 100;
+        const CONCURRENCY_LEVEL: usize = 4;
+        let mut total_ns = 0u128;
+        for _ in 0..TASKS {
+            let start = Instant::now();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let futures: Vec<_> = (0..CONCURRENCY_LEVEL)
+                    .map(|_| {
+                        tokio::spawn(async {
+                            tokio::task::yield_now().await;
+                        })
+                    })
+                    .collect();
+                futures::future::join_all(futures).await;
+            });
+            total_ns += start.elapsed().as_nanos();
+        }
+        total_ns as f64 / TASKS as f64 / CONCURRENCY_LEVEL as f64
+    }
+
+
+    #[test]
+    fn measure_task_overhead() {
+        let avg_overhead_ns = measure_task_overhead_inner();
+        println!("[Empirical] T_overhead (Task Management Overhead) = {:.2} ns/task", avg_overhead_ns);
+        assert!(avg_overhead_ns > 0.0);
+    }
+
+    fn measure_concurrent_deletion_time(n: usize, files: Vec<PathBuf>) -> Duration {
+        let start = Instant::now();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let futures: Vec<_> = files.iter().map(|path| {
+                let path_clone = path.clone();
+                tokio::spawn(async move {
+                    unlink_file(&path_clone).unwrap();
+                })
+            }).collect();
+            futures::future::join_all(futures).await;
+        });
+        start.elapsed()
+    }
+
+
+    /// Measure I/O Efficiency f_disk(n) and return the data
+    fn measure_io_efficiency() -> Vec<(f64, f64)> {
+        let tmp_dir = tempdir().unwrap();
+        let base_files = create_files_for_measurement(tmp_dir.path());
+        let concurrency_levels = vec![1, 2, 4, 8, 16, 32, 64, 128];
+
+        let avg_conversion_ns = measure_path_conversion_time_inner();
+        let avg_syscall_ns = measure_syscall_time_inner(&base_files);
+        let avg_overhead_ns = measure_task_overhead_inner();
+
+        println!("\n[Empirical] I/O Efficiency f_disk(n) at different concurrency levels:");
+        println!("--- Empirical Constants (for f_disk calculation) ---");
+        println!("T_conversion = {:.2} ns/path", avg_conversion_ns);
+        println!("T_syscall = {:.2} ns/file", avg_syscall_ns);
+        println!("T_overhead = {:.2} ns/task", avg_overhead_ns);
+        println!("--- f_disk(n) values ---");
+
+        let n_files = base_files.len();
+        let mut f_disk_values = Vec::new();
+
+        for &concurrency in &concurrency_levels {
+            let mut total_deletion_time = Duration::new(0, 0);
+            for _ in 0..ITERATIONS {
+                let files = base_files.clone();  // Use cloned file set each iteration.
+                total_deletion_time += measure_concurrent_deletion_time(concurrency, files);
+            }
+            let avg_total_deletion_time_ns = total_deletion_time.as_nanos() / ITERATIONS as u128;
+
+            let t_syscall_actual_ns = (avg_total_deletion_time_ns as f64) - (n_files as f64 * avg_conversion_ns) - (concurrency as f64 * avg_overhead_ns);
+            let t_syscall_ideal_ns = (n_files as f64 * avg_syscall_ns) / concurrency as f64;
+
+            let f_disk_n = if t_syscall_actual_ns > 0.0 {
+                t_syscall_ideal_ns / t_syscall_actual_ns
+            } else {
+                1.0
+            };
+
+            println!("f_disk({}) = {:.6}", concurrency, f_disk_n);
+            f_disk_values.push((concurrency as f64, f_disk_n)); // Store for curve fitting
+        }
+    f_disk_values
+    }
+
+
+    #[test]
+    fn test_fit_f_disk_function() {
+
+        // Get Empirical Data from measure_io_efficiency
+        let f_disk_data_vec = measure_io_efficiency();
+
+        // Convert Vec<(f64, f64)> to ndarray::Array1<f64>
+        let n_data: Array1<f64> = f_disk_data_vec.iter().map(|&(n, _)| n).collect();
+        let f_disk_data: Array1<f64> = f_disk_data_vec.iter().map(|&(_, f_disk)| f_disk).collect();
+
+        // Define the Rational Function Model (Same as Before)
+        #[derive(Clone)]
+        struct DiskEfficiencyFunc;
+
+        impl CostFunction for DiskEfficiencyFunc {
+            type Param = Array1<f64>;
+            type Output = f64;
+
+            fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
+                let a = p[0];
+                let b = p[1];
+                let mut sum_squared_errors = 0.0;
+
+                for i in 0..n_data.len() {
+                    let n_val = n_data[i];
+                    let empirical_f_disk = f_disk_data[i];
+                    let predicted_f_disk = 1.0 / (1.0 + a * (n_val.powf(b)));
+                    sum_squared_errors += (predicted_f_disk - empirical_f_disk).powi(2);
+                }
+                Ok(sum_squared_errors)
+            }
+        }
+
+        // Optimization Problem Setup (Argmin)
+        let cost_function = DiskEfficiencyFunc;
+        let initial_params = Array1::from_vec(vec![0.01, 1.0]); // Initial guess: for convergence
+        let solver = BFGS::new();
+
+        // Run Optimizer (Same as Before)
+        let res = Executor::new(cost_function, solver, initial_params)
+            .max_iters(1000)
+            .run()
+            .unwrap();  // Add error handling in production code
+
+        // Extract Fitted Parameters (Same as Before)
+        let best_params = res.state.best_param.clone().unwrap(); // Directly access best_param
+        let a_fitted = best_params[0];
+        let b_fitted = best_params[1];
+
+        println!("\n--- Fitted Parameters for f_disk(n) = 1 / (1 + a * n^b) ---");
+        println!("F_DISK_A_FIT = {:.8f}", a_fitted);  // Use in main.rs
+        println!("F_DISK_B_FIT = {:.8f}", b_fitted);  // Use in main.rs
+
+        assert!(a_fitted > 0.0, "Fitted parameter 'a' should be positive");
+        assert!(b_fitted > 0.0, "Fitted parameter 'b' should be positive");
     }
 }
 
