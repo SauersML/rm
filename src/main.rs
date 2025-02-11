@@ -16,7 +16,6 @@ use num_cpus;
 use tokio::runtime::Builder;
 use std::os::unix::ffi::OsStrExt;
 
-
 // ===========================
 // HARDCODED CONSTANTS (from empirical tests):
 const T_CONVERSION_NS: f64 = 116.56;
@@ -806,7 +805,6 @@ mod test_prediction {
         let max_time = max_predicted.max(max_actual);
     
         let mut chart1 = ChartBuilder::on(&root1)
-            .caption("Predicted vs. Actual Deletion Time", ("sans-serif", 50).into_font())
             .margin(5)
             .x_label_area_size(30)
             .y_label_area_size(40)
@@ -937,7 +935,6 @@ mod test_prediction {
         root2.fill(&WHITE).unwrap();
         
         let mut chart2 = ChartBuilder::on(&root2)
-            .caption("Number of Files vs Actual Deletion Time", ("sans-serif", 50).into_font())
             .margin(5)
             .x_label_area_size(60)
             .y_label_area_size(60)
@@ -1089,7 +1086,6 @@ mod test_grid {
         let max_concurrency = data.iter().map(|&(_, y, _)| y).fold(0.0, f64::max);
         let max_files = data.iter().map(|&(_, _, z)| z).fold(0.0, f64::max);
         let mut chart = ChartBuilder::on(&root)
-            .caption("Optimal Concurrency vs. CPUs and File Count", ("sans-serif", 50).into_font())
             .margin(5)
             .x_label_area_size(60)
             .y_label_area_size(60)
