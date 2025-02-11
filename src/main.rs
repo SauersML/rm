@@ -15,6 +15,7 @@ use num_cpus;
 use tokio::runtime::Builder;
 use std::os::unix::ffi::OsStrExt;
 use lazy_static::lazy_static;
+use progression::{Bar, Config};
 
 /// Delete a single file via a direct `unlink` (libc) call.
 
