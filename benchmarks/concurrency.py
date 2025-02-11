@@ -5,6 +5,8 @@ from mpl_toolkits.mplot3d import Axes3D
 import seaborn as sns
 import statsmodels.api as sm
 from scipy.stats import pearsonr
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import cross_val_score
 from sklearn.model_selection import train_test_split
 
 def main():
@@ -173,6 +175,36 @@ def main():
     plt.tight_layout()
     plt.show()
 
+
+    # Define the candidate features to add to the baseline
+    candidate_features = ['log_Concurrency', 'log_SimulatedCPUs', 'log_Concurrency_sq', 'log_SimulatedCPUs_sq']
+    
+    # Define the baseline predictor and response
+    X_baseline = df[['log_NumFiles']]
+    y = df['log_TotalTime']
+    
+    # Set the number of folds for cross-validation
+    cv_folds = 5
+    
+    # Evaluate the baseline model using 5-fold CV
+    baseline_cv_scores = cross_val_score(LinearRegression(), X_baseline, y, cv=cv_folds, scoring='r2')
+    baseline_cv_mean = baseline_cv_scores.mean()
+    baseline_cv_std = baseline_cv_scores.std()
+    
+    print("Baseline Model (using only 'log_NumFiles'):")
+    print(f"  CV R²: {baseline_cv_mean:.4f} (± {baseline_cv_std:.4f})")
+    print("-" * 50)
+    
+    # Loop over each candidate feature, add it to the baseline, and perform CV
+    for feature in candidate_features:
+        X_candidate = df[['log_NumFiles', feature]]
+        cv_scores = cross_val_score(LinearRegression(), X_candidate, y, cv=cv_folds, scoring='r2')
+        cv_mean = cv_scores.mean()
+        cv_std = cv_scores.std()
+        improvement = cv_mean - baseline_cv_mean
+        print(f"Model with features: log_NumFiles + {feature}")
+        print(f"  CV R²: {cv_mean:.4f} (± {cv_std:.4f})  |  Improvement vs. baseline: {improvement:+.4f}")
+        print("-" * 50)
 
 if __name__ == '__main__':
     main()
