@@ -597,7 +597,7 @@ mod empirical_tests {
         let mut a = 0.01;
         let mut b = 1.0;
     
-        let mut current_cost = cost(a, b);
+        let current_cost = cost(a, b);
         println!("Initial cost: {:.12}", current_cost);
     
         // Begin gradient descent loop.
