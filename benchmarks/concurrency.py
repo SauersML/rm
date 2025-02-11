@@ -81,12 +81,10 @@ def main():
     df['log_Concurrency_sq'] = df['log_Concurrency'] ** 2
     df['log_SimulatedCPUs_sq'] = df['log_SimulatedCPUs'] ** 2
     df['log_TotalTime'] = np.log(df['TotalTime(ns)'])
-    df['log_NumFiles_x_log_Concurrency'] = df['log_NumFiles'] * df['log_Concurrency']
     
     # Define predictors and response in log-space
     features = ['log_NumFiles', 'log_Concurrency', 'log_SimulatedCPUs',
-                'log_Concurrency_sq', 'log_SimulatedCPUs_sq', 'log_NumFiles_x_log_Concurrency']
-
+                'log_Concurrency_sq', 'log_SimulatedCPUs_sq']
 
     X_new = df[features]
     y_new = df['log_TotalTime']
