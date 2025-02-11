@@ -977,8 +977,11 @@ mod test_grid {
     use rand::{Rng, thread_rng};
     use plotters::prelude::*;
     use plotters::style::colors::{BLACK, WHITE};
+    use std::fs::OpenOptions;
+    use std::io::BufWriter;
 
     const TEST_FILE_SIZE_KB: usize = 1;
+    const CSV_FILE_NAME: &str = "test_results.csv";
 
     /// Creates a set of test files in the given directory.
     fn create_test_files(dir: &Path, count: usize) -> Vec<PathBuf> {
@@ -997,7 +1000,6 @@ mod test_grid {
         let max_val_f64 = max_val as f64;
         let log_max = max_val_f64.log10();
         let mut values = Vec::new();
-
         if num_points > 1 {
             for i in 0..(num_points - 1) {
                 let t = i as f64 / (num_points as f64 - 1.0);
@@ -1006,155 +1008,132 @@ mod test_grid {
                 values.push(val);
             }
         }
-
-        values.push(max_val); // Ensure max_val is included
-        values.dedup(); //Remove duplicates
+        values.push(max_val);
+        values.dedup();
         values
     }
 
     #[test]
     fn test_grid_search() {
         let actual_cpus = num_cpus::get();
-        let num_simulated_cpus = actual_cpus.min(32); // Max 32 simulated CPU counts
+        let num_simulated_cpus = actual_cpus;
         let simulated_cpu_counts = generate_log_space(actual_cpus, num_simulated_cpus);
-
-        let file_counts = [10, 100, 1000, 10000, 100000]; // Example file counts
-        //let max_concurrency_multiplier = 4; // Removed
-        
+        let file_counts = [10, 100, 1000, 10000, 100000];
+        let max_concurrency_multiplier = 8;
         println!("\n[Grid Search Test] Running...");
-
-        // Data for 3D plot
         let mut plot_data: Vec<(f64, f64, f64)> = Vec::new();
-
+        let csv_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(CSV_FILE_NAME)
+            .expect("Failed to open CSV file");
+        let mut csv_writer = BufWriter::new(csv_file);
+        if csv_writer.get_ref().metadata().unwrap().len() == 0 {
+            writeln!(csv_writer, "SimulatedCPUs,NumFiles,Concurrency,TotalTime(ns)").expect("Failed to write CSV header");
+        }
         for &simulated_cpus in &simulated_cpu_counts {
-            //Limit threads
             let num_threads = simulated_cpus.min(actual_cpus);
-
-            // Create a new Tokio runtime for each simulated CPU count
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(num_threads) // Set the number of worker threads
+                .worker_threads(num_threads)
                 .build()
                 .unwrap();
-
             for &num_files in &file_counts {
                 let tmp_dir = tempdir().unwrap();
-                // Create files *before* the concurrency loop
-                let files = create_test_files(tmp_dir.path(), num_files);
-
-                // Create pattern *before* the concurrency loop
                 let pattern = format!("{}/*", tmp_dir.path().to_string_lossy());
-
                 let mut min_time = Duration::MAX;
                 let mut optimal_concurrency = 1;
-
-                // Iterate up to the number of threads (simulated CPUs), not beyond.
-                for concurrency in 1..=num_threads {
+                for concurrency in 1..=(max_concurrency_multiplier * simulated_cpus) {
+                    create_test_files(tmp_dir.path(), num_files);
                     let start = Instant::now();
-                    runtime
-                        .block_on(run_deletion(&pattern, Some(concurrency))) // Use 'concurrency' directly
-                        .unwrap();
+                    runtime.block_on(run_deletion(&pattern, Some(concurrency))).unwrap();
                     let elapsed = start.elapsed();
-
                     println!(
                         "  Simulated CPUs: {}, Files: {}, Concurrency: {}, Time: {:?}",
-                        simulated_cpus, num_files, concurrency, elapsed // Use 'concurrency'
+                        simulated_cpus, num_files, concurrency, elapsed
                     );
-
+                    writeln!(
+                        csv_writer,
+                        "{},{},{},{}",
+                        simulated_cpus,
+                        num_files,
+                        concurrency,
+                        elapsed.as_nanos()
+                    ).expect("Failed to write to CSV");
                     if elapsed < min_time {
                         min_time = elapsed;
-                        optimal_concurrency = concurrency; // Use 'concurrency'
+                        optimal_concurrency = concurrency;
                     }
                 }
-
-                // Store data for plotting
+                csv_writer.flush().expect("Failed to flush CSV writer");
                 plot_data.push((
                     simulated_cpus as f64,
-                    optimal_concurrency as f64, // Use 'optimal_concurrency'
+                    optimal_concurrency as f64,
                     num_files as f64,
                 ));
-
                 println!(
                     "[Grid Search Test] Optimal Concurrency (Simulated CPUs: {}, Files: {}): {}",
-                    simulated_cpus, num_files, optimal_concurrency // Use 'optimal_concurrency'
+                    simulated_cpus, num_files, optimal_concurrency
                 );
             }
         }
-
-        // Create the 3D plot
         create_3d_plot(&plot_data).expect("Failed to create 3D plot");
-        println!("[Grid Search Test] Complete.  See optimal_concurrency.png");
+        println!("[Grid Search Test] Complete.  See optimal_concurrency.png and {}", CSV_FILE_NAME);
     }
 
     /// Creates a 3D plot of the optimal concurrency data.
     fn create_3d_plot(data: &[(f64, f64, f64)]) -> Result<(), Box<dyn std::error::Error>> {
         let root = BitMapBackend::new("optimal_concurrency.png", (1024, 768)).into_drawing_area();
         root.fill(&WHITE)?;
-
-        // Find maximum values for scaling the axes
         let max_cpus = data.iter().map(|&(x, _, _)| x).fold(0.0, f64::max);
         let max_concurrency = data.iter().map(|&(_, y, _)| y).fold(0.0, f64::max);
         let max_files = data.iter().map(|&(_, _, z)| z).fold(0.0, f64::max);
-
         let mut chart = ChartBuilder::on(&root)
-            .caption(
-                "Optimal Concurrency vs. CPUs and File Count",
-                ("sans-serif", 50).into_font(),
-            )
+            .caption("Optimal Concurrency vs. CPUs and File Count", ("sans-serif", 50).into_font())
             .margin(5)
             .x_label_area_size(60)
             .y_label_area_size(60)
             .build_cartesian_3d(0.0..max_cpus, 0.0..max_concurrency, 0.0..max_files)?;
-
         chart.configure_axes().draw()?;
-
-        // Manually draw axis labels (workaround for 3D charts in Plotters)
-        let label_style = ("sans-serif", 20).into_font(); // Increased font size
-        let x_mid = max_cpus / 2.0;
-        let y_mid = max_concurrency / 2.0;
-        let z_mid = max_files / 2.0;
-
-        // Draw X-axis label using draw_series and a single Text element
+        let label_style = ("sans-serif", 20).into_font();
         chart
             .draw_series(std::iter::once(Text::new(
                 "Simulated CPUs",
-                (max_cpus + 5.0, 0.0, 0.0), // Adjusted position for visibility
+                (max_cpus + 5.0, 0.0, 0.0),
                 label_style.clone(),
-            )))
-            .unwrap();
-
-        // Draw Y-axis label, rotating it for better visibility
+            )))?
+            .label("Simulated CPUs")
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLACK));
         chart
             .draw_series(std::iter::once(Text::new(
                 "Optimal Concurrency",
-                (0.0, max_concurrency + 2.5, 0.0), // Adjusted position
-            )))
-            .unwrap();
-
-        // Draw Z-axis label, rotating it and adding an offset.
+                (0.0, max_concurrency + 2.5, 0.0),
+                label_style.clone().transform(FontTransform::Rotate90),
+            )))?
+            .label("Optimal Concurrency")
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x, y + 20)], &BLACK));
         chart
             .draw_series(std::iter::once(Text::new(
                 "Number of Files",
-                (0.0, -7.0, max_files + 1000.0), // Offset added on the Z axis.
-            )))
-            .unwrap();
-
-        chart
-            .draw_series(data.iter().map(|&(x, y, z)| {
-                let style = plotters::style::ShapeStyle {
-                    color: plotters::style::RGBColor(
-                        (255.0 * y / max_concurrency) as u8,
-                        0,
-                        (255.0 * (1.0 - y / max_concurrency)) as u8,
-                    )
-                    .into(),
-                    filled: true,
-                    stroke_width: 1,
-                };
-                Cross::new((x, y, z), 5, style)
-            }))
-            .unwrap();
+                (0.0, -7.0, max_files + 1000.0),
+                label_style.clone().transform(FontTransform::Rotate270),
+            )))?
+            .label("Number of Files")
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &BLACK));
+        chart.draw_series(data.iter().map(|&(x, y, z)| {
+            let style = plotters::style::ShapeStyle {
+                color: plotters::style::RGBColor(
+                    (255.0 * y / max_concurrency) as u8,
+                    0,
+                    (255.0 * (1.0 - y / max_concurrency)) as u8,
+                ).into(),
+                filled: true,
+                stroke_width: 1,
+            };
+            Cross::new((x, y, z), 5, style)
+        }))?;
         Ok(())
     }
 }
+
 // cargo test --release -- --nocapture
