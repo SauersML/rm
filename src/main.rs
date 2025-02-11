@@ -18,6 +18,19 @@ use std::os::unix::ffi::OsStrExt;
 
 
 /// Delete a single file via a direct `unlink` (libc) call.
+
+/// The `libc::unlink` function is a blocking system call.  In an asynchronous environment like Tokio,
+/// executing blocking operations directly on the main async runtime threads is highly detrimental to performance.
+/// Blocking a runtime thread will prevent it from processing other asynchronous tasks, potentially leading to
+/// thread starvation, increased latency, and reduced overall throughput of the application.
+///
+/// To mitigate this, we utilize `tokio::task::spawn_blocking`. This function offloads the execution of
+/// the provided closure (which contains the `unlink` call) to a dedicated thread pool managed by Tokio,
+/// separate from the core async runtime's worker threads.
+///
+/// By using `spawn_blocking`, we ensure that the blocking `unlink` operation does not impede the progress of
+/// other asynchronous tasks running on the main Tokio runtime.  This is crucial for maintaining responsiveness
+/// and maximizing the efficiency of concurrent file deletions in an async context.
 fn unlink_file(path: &Path) -> io::Result<()> {
     let c_str = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Path contains null byte"))?;
@@ -104,6 +117,14 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
             let pb = pb.clone();
             let completed_counter = completed_counter.clone();
             async move {
+
+                    //   1. Atomic Counter Operations:  Incrementing `completed_counter` (even though atomic) still involves
+                    //      some overhead, especially with frequent updates.
+                    //   2. Progress Bar I/O and Rendering: Updating the `indicatif::ProgressBar` involves I/O operations
+                    //      to the terminal and re-rendering the progress bar display. Frequent I/O can be relatively slow.
+                    //
+                    // To reduce this overhead, we should implement batched progress bar updates. Instead of updating
+                    // after every deletion, we can update the progress bar less frequently.
                 match unlink_file(&path) {
                     Ok(_) => {
                         let done = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
