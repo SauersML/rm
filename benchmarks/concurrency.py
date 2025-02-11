@@ -67,75 +67,112 @@ def main():
     cbar.set_label("NumFiles")
     plt.tight_layout()
     plt.show()
-
+    
     # =============================================================================
-    # Plot 4: Linear model predicting TotalTime(ns) using our improved model.
+    # Plot 4: Linear model predicting TotalTime(ns) using our improved model,
+    #         and comparing it to a simple model with only the log-transformed
+    #         number of files feature.
     # =============================================================================
+    
     # Drop rows with non-positive values for Concurrency, SimulatedCPUs, or TotalTime(ns)
     df = df[(df['Concurrency'] > 0) & (df['SimulatedCPUs'] > 0) & (df['TotalTime(ns)'] > 0)]
-
-    # Create new features in log-space, using a shift for NumFiles to handle zero values
-    df['log_NumFiles'] = np.log(df['NumFiles'] + 1)
-    df['log_Concurrency'] = np.log(df['Concurrency'])
+    
+    # Create new features in log-space (adding 1 to NumFiles to handle zero values)
+    df['log_NumFiles']    = np.log(df['NumFiles'] + 1)
+    df['log_Concurrency']   = np.log(df['Concurrency'])
     df['log_SimulatedCPUs'] = np.log(df['SimulatedCPUs'])
-    df['log_Concurrency_sq'] = df['log_Concurrency'] ** 2
+    df['log_TotalTime']     = np.log(df['TotalTime(ns)'])
+    
+    # Create squared terms
+    df['log_Concurrency_sq']   = df['log_Concurrency'] ** 2
     df['log_SimulatedCPUs_sq'] = df['log_SimulatedCPUs'] ** 2
-    df['log_TotalTime'] = np.log(df['TotalTime(ns)'])
     
-    # Define predictors and response in log-space
-    features = ['log_NumFiles', 'log_Concurrency', 'log_SimulatedCPUs',
-                'log_Concurrency_sq', 'log_SimulatedCPUs_sq']
-
-    X_new = df[features]
-    y_new = df['log_TotalTime']
+    # Define predictors for the full model and the simple model
+    features_full   = ['log_NumFiles', 'log_Concurrency', 'log_SimulatedCPUs',
+                       'log_Concurrency_sq', 'log_SimulatedCPUs_sq']
+    features_simple = ['log_NumFiles']
     
-    # Split data into training and testing sets (70% train, 30% test)
-    X_train, X_test, y_train, y_test = train_test_split(X_new, y_new, test_size=0.3, random_state=42)
+    # Define the response variable
+    y = df['log_TotalTime']
     
-    # Add constant term to both training and testing predictors
-    X_train_const = sm.add_constant(X_train)
-    X_test_const = sm.add_constant(X_test)
+    # For a consistent train-test split, use the DataFrame index
+    train_idx, test_idx = train_test_split(df.index, test_size=0.3, random_state=42)
     
-    # Fit the OLS model on the training data
-    model = sm.OLS(y_train, X_train_const).fit()
-    print(model.summary())
+    # Create training and test sets for both models
+    X_train_full   = df.loc[train_idx, features_full]
+    X_test_full    = df.loc[test_idx,  features_full]
+    X_train_simple = df.loc[train_idx, features_simple]
+    X_test_simple  = df.loc[test_idx,  features_simple]
+    y_train        = df.loc[train_idx, 'log_TotalTime']
+    y_test         = df.loc[test_idx,  'log_TotalTime']
     
-    # Predict on the test set
-    y_test_pred = model.predict(X_test_const)
+    # Add a constant term (intercept) to the predictors
+    X_train_full_const   = sm.add_constant(X_train_full)
+    X_test_full_const    = sm.add_constant(X_test_full)
+    X_train_simple_const = sm.add_constant(X_train_simple)
+    X_test_simple_const  = sm.add_constant(X_test_simple)
     
-    # Exponentiate predictions and actual test responses to convert back to the original scale
-    y_test_pred_exp = np.exp(y_test_pred)
-    y_test_exp = np.exp(y_test)
+    # Fit the full model (with all predictors) and the simple model
+    model_full   = sm.OLS(y_train, X_train_full_const).fit()
+    model_simple = sm.OLS(y_train, X_train_simple_const).fit()
     
-    # Compute Pearson correlation and p-value on the original scale
-    r, p = pearsonr(y_test_exp, y_test_pred_exp)
+    # Print out the model summaries for comparison
+    print("Full Model Summary:")
+    print(model_full.summary())
+    print("\nSimple Model Summary:")
+    print(model_simple.summary())
     
-    # Compute standardized beta coefficients using training set statistics.
-    # For each predictor (excluding the intercept), standardize by multiplying with (std(X) / std(y)).
-    std_X_train = X_train.std()
-    std_y_train = y_train.std()
-    standardized_betas = model.params[1:] * (std_X_train / std_y_train)
+    # Predict on the test sets for both models
+    y_test_pred_full   = model_full.predict(X_test_full_const)
+    y_test_pred_simple = model_simple.predict(X_test_simple_const)
     
-    # Create a figure with two subplots:
-    # Left: Scatter plot of actual vs. predicted TotalTime(ns) on the original scale.
-    # Right: Bar plot of the standardized beta coefficients.
+    # Exponentiate the predictions and the actual values to convert back to the original scale
+    y_test_pred_full_exp   = np.exp(y_test_pred_full)
+    y_test_pred_simple_exp = np.exp(y_test_pred_simple)
+    y_test_exp             = np.exp(y_test)
+    
+    # Compute Pearson correlation (and p-value) on the original scale for both models
+    r_full,   p_full   = pearsonr(y_test_exp, y_test_pred_full_exp)
+    r_simple, p_simple = pearsonr(y_test_exp, y_test_pred_simple_exp)
+    
+    # Plot actual vs. predicted TotalTime(ns) for both models
     fig, axs = plt.subplots(1, 2, figsize=(14, 6))
     
-    axs[0].scatter(y_test_exp, y_test_pred_exp, color='teal')
+    # Left: Full model
+    axs[0].scatter(y_test_exp, y_test_pred_full_exp, color='teal')
     axs[0].set_xlabel("Actual TotalTime(ns)")
     axs[0].set_ylabel("Predicted TotalTime(ns)")
-    axs[0].set_title("Actual vs Predicted TotalTime(ns) (Test Set)")
-    # Annotate with Pearson correlation coefficient and p-value
-    axs[0].text(0.05, 0.95, f"r = {r:.3f}\np = {p:.3e}",
+    axs[0].set_title("Full Model Predictions (Test Set)")
+    axs[0].text(0.05, 0.95, f"r = {r_full:.3f}\np = {p_full:.3e}\nR² = {model_full.rsquared:.3f}",
                 transform=axs[0].transAxes, verticalalignment='top',
                 bbox=dict(facecolor='white', alpha=0.5))
     
-    standardized_betas.plot(kind='bar', ax=axs[1], color='coral')
-    axs[1].set_ylabel("Standardized Beta Coefficient")
-    axs[1].set_title("Z-Normed Beta Coefficients (Training Set)")
+    # Right: Simple model (only log_NumFiles)
+    axs[1].scatter(y_test_exp, y_test_pred_simple_exp, color='purple')
+    axs[1].set_xlabel("Actual TotalTime(ns)")
+    axs[1].set_ylabel("Predicted TotalTime(ns)")
+    axs[1].set_title("Simple Model Predictions (Test Set)")
+    axs[1].text(0.05, 0.95, f"r = {r_simple:.3f}\np = {p_simple:.3e}\nR² = {model_simple.rsquared:.3f}",
+                transform=axs[1].transAxes, verticalalignment='top',
+                bbox=dict(facecolor='white', alpha=0.5))
     
     plt.tight_layout()
     plt.show()
+    
+    # Plot raw coefficients for the full model (excluding the intercept if present)
+    fig2, ax2 = plt.subplots(figsize=(7, 6))
+    # Check if 'const' exists in the parameters; if so, drop it.
+    if 'const' in model_full.params.index:
+        raw_betas_full = model_full.params.drop('const')
+    else:
+        raw_betas_full = model_full.params
+    
+    raw_betas_full.plot(kind='bar', color='skyblue', ax=ax2)
+    ax2.set_ylabel("Beta Coefficient")
+    ax2.set_title("Full Model Coefficients (Training Set)")
+    plt.tight_layout()
+    plt.show()
+
 
 if __name__ == '__main__':
     main()
