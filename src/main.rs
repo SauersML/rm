@@ -382,7 +382,6 @@ mod empirical_tests {
     use std::time::{Instant, Duration};
     use tempfile::tempdir;
     use rand::{Rng, thread_rng};
-    use rand::distributions::Alphanumeric;
     use std::iter;
     use argmin::core::{Error, Executor, CostFunction};
     use argmin::solver::quasinewton::BFGS;
