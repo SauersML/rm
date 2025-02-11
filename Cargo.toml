@@ -24,30 +24,3 @@ argmin = "0.10.0"
 statrs = "0.18.0"
 lazy_static = "1.5.0"
 argmin-math   = { version = "0.4.0", features = ["ndarray_latest"] }
-
-[dependencies.plotters]
-version = "0.3.7"
-default-features = false
-features = [
-  "all_elements",
-  "all_series",
-  "bitmap_backend",
-  "bitmap_encoder",
-  "bitmap_gif",
-  "chrono",
-  "colormaps",
-  "deprecated_items",
-  "full_palette",
-  "image",
-  "svg_backend",
-  "boxplot",
-  "candlestick",
-  "errorbar",
-  "histogram",
-  "area_series",
-  "line_series",
-  "point_series",
-  "surface_series",
-  "plotters-bitmap",
-  "plotters-svg"
-]
