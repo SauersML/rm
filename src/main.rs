@@ -15,7 +15,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use num_cpus;
 use tokio::runtime::Builder;
 use std::os::unix::ffi::OsStrExt;
-
+use lazy_static::lazy_static;
 
 /// Delete a single file via a direct `unlink` (libc) call.
 
@@ -43,20 +43,23 @@ fn unlink_file(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Compute the optimal concurrency level. FLAWED.
+lazy_static! {
+    // Cache the number of CPUs and its f64 conversion as a static variable.
+    static ref N_CPUS: usize = num_cpus::get();
+    static ref N_CPUS_F: f64 = *N_CPUS as f64;
+}
+
+/// Compute the optimal concurrency level.
+/// Model: optimal concurrency = e^((1.6063) + (0.6350 * log(CPUs)) - (0.0909 * log((NumFiles + 1))))
 fn compute_optimal_concurrency(num_files: usize) -> usize {
-    if num_files == 0 {
-        return 1;
-    }
+    let num_files_f = num_files as f64;
 
-    let n_cpus = num_cpus::get();
+    // Compute the optimal concurrency using the cached N_CPUS_F.
+    let optimal_concurrency = (1.6063 + 0.6350 * N_CPUS_F.ln() - 0.0909 * (num_files_f + 1.0).ln()).exp();
 
-    let raw_value = (num_files as f64) + (n_cpus as f64);
-    let candidate_n = raw_value.round() as usize;
-
-    // Limit concurrency to the number of CPU cores, and make sure it's at least 1.
-    let n_opt = candidate_n.clamp(1, n_cpus);
-    n_opt
+    // Round the result and clamp it between 1 and the number of CPU cores.
+    let candidate = optimal_concurrency.round() as usize;
+    candidate.clamp(1, *N_CPUS)
 }
 
 /// Main async entry point.
