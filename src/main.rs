@@ -385,10 +385,6 @@ mod empirical_tests {
     use std::time::{Instant, Duration};
     use tempfile::tempdir;
     use std::iter;
-    use argmin::core::{Error, Executor, CostFunction};
-    use argmin::solver::quasinewton::BFGS;
-    use ndarray::Array1;
-    use argmin_math::*;
 
     const TEST_FILE_SIZE_KB: usize = 1;
     const TEST_FILE_COUNT: usize = 100;
@@ -595,7 +591,7 @@ mod empirical_tests {
         // --- Optimization Settings ---
         let max_iters = 1000;
         let tol = 1e-9;
-        let mut learning_rate = 1e-3; // initial learning rate
+        let learning_rate = 1e-3; // initial learning rate
     
         // Initial guesses for a and b.
         let mut a = 0.01;
@@ -648,11 +644,8 @@ mod empirical_tests {
             // Check for convergence based on cost improvement.
             if (current_cost - new_cost).abs() < tol {
                 println!("Cost improvement below tolerance at iteration {}.", iter);
-                current_cost = new_cost;
                 break;
             }
-    
-            current_cost = new_cost;
         }
     
         println!("\n--- Fitted Parameters for f_disk(n) = 1/(1 + a * n^b) ---");
