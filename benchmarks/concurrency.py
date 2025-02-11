@@ -78,20 +78,16 @@ def main():
     
     # Drop rows with non-positive values for Concurrency, SimulatedCPUs, or TotalTime(ns)
     df = df[(df['Concurrency'] > 0) & (df['SimulatedCPUs'] > 0) & (df['TotalTime(ns)'] > 0)]
-    
+
     # Create new features in log-space (adding 1 to NumFiles to handle zero values)
     df['log_NumFiles']    = np.log(df['NumFiles'] + 1)
     df['log_Concurrency']   = np.log(df['Concurrency'])
     df['log_SimulatedCPUs'] = np.log(df['SimulatedCPUs'])
     df['log_TotalTime']     = np.log(df['TotalTime(ns)'])
-    
-    # Create squared terms
-    df['log_Concurrency_sq']   = df['log_Concurrency'] ** 2
-    df['log_SimulatedCPUs_sq'] = df['log_SimulatedCPUs'] ** 2
+
     
     # Define predictors for the full model and the simple model
-    features_full   = ['log_NumFiles', 'log_Concurrency', 'log_SimulatedCPUs',
-                       'log_Concurrency_sq', 'log_SimulatedCPUs_sq']
+    features_full   = ['log_NumFiles', 'log_Concurrency', 'log_SimulatedCPUs']
     features_simple = ['log_NumFiles']
     
     # Define the response variable
@@ -177,7 +173,7 @@ def main():
 
 
     # Define the candidate features to add to the baseline
-    candidate_features = ['log_Concurrency', 'log_SimulatedCPUs', 'log_Concurrency_sq', 'log_SimulatedCPUs_sq']
+    candidate_features = ['log_Concurrency', 'log_SimulatedCPUs']
     
     # Define the baseline predictor and response
     X_baseline = df[['log_NumFiles']]
