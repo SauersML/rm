@@ -302,8 +302,6 @@ mod performance_tests {
     /// Structure to hold benchmark results.
     struct BenchmarkResult {
         test_name: String,
-        file_count: usize,
-        file_size_kb: usize,
         rust_time: f64,
         rm_time: f64,
     }
