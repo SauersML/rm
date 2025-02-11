@@ -206,5 +206,40 @@ def main():
         print(f"  CV R²: {cv_mean:.4f} (± {cv_std:.4f})  |  Improvement vs. baseline: {improvement:+.4f}")
         print("-" * 50)
 
+
+    # First, drop any rows with non-positive values in the key variables
+    df_ctrl = df[(df['Concurrency'] > 0) & (df['SimulatedCPUs'] > 0) & (df['TotalTime(ns)'] > 0)]
+    
+    # Create log-transformed variables (we add 1 to NumFiles to avoid issues with zero)
+    df_ctrl['log_TotalTime']    = np.log(df_ctrl['TotalTime(ns)'])
+    df_ctrl['log_Concurrency']    = np.log(df_ctrl['Concurrency'])
+    df_ctrl['log_NumFiles']       = np.log(df_ctrl['NumFiles'] + 1)
+    df_ctrl['log_SimulatedCPUs']  = np.log(df_ctrl['SimulatedCPUs'])
+    
+    # Define the regression model:
+    #   Dependent variable: log_TotalTime
+    #   Main predictor of interest: log_Concurrency
+    #   Controls: log_NumFiles and log_SimulatedCPUs
+    X_ctrl = df_ctrl[['log_Concurrency', 'log_NumFiles', 'log_SimulatedCPUs']]
+    y_ctrl = df_ctrl['log_TotalTime']
+
+    # Add a constant term for the intercept
+    X_ctrl_const = sm.add_constant(X_ctrl)
+    
+    # Fit the OLS model
+    model_ctrl = sm.OLS(y_ctrl, X_ctrl_const).fit()
+    
+    # Print the full regression summary
+    print("Effect of CONCURRENCY on TotalTime, Controlling for All Other Factors:")
+    print("-----------------------------------------------------------------------")
+    print(model_ctrl.summary())
+    print("-----------------------------------------------------------------------")
+    
+    # Specifically report the coefficient and p-value for log_Concurrency
+    coef = model_ctrl.params['log_Concurrency']
+    p_val = model_ctrl.pvalues['log_Concurrency']
+    print(f"Coefficient for log_Concurrency: {coef:.4f}")
+    print(f"P-value for log_Concurrency: {p_val:.4f}")
+
 if __name__ == '__main__':
     main()
