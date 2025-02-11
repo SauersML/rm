@@ -550,79 +550,117 @@ mod empirical_tests {
 
     #[test]
     fn test_fit_f_disk_function() {
-
-        // Get Empirical Data from measure_io_efficiency
-        let f_disk_data_vec = measure_io_efficiency();
-
-        // Convert Vec<(f64, f64)> to ndarray::Array1<f64>
-        let n_data: Array1<f64> = f_disk_data_vec.iter().map(|&(n, _)| n).collect();
-        let f_disk_data: Array1<f64> = f_disk_data_vec.iter().map(|&(_, f_disk)| f_disk).collect();
-
-        // Define the Rational Function Model
-        #[derive(Clone)]
-        struct DiskEfficiencyFunc {
-            n_data: Array1<f64>,
-            f_disk_data: Array1<f64>,
+        // Obtain empirical data: a vector of (n, f_disk) measurements.
+        let data = measure_io_efficiency();
+        if data.is_empty() {
+            panic!("No empirical I/O efficiency data available.");
         }
-        impl CostFunction for DiskEfficiencyFunc {
-            type Param = Array1<f64>;
-            type Output = f64;
-        
-            fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
-                let a = p[0];
-                let b = p[1];
-                let mut sum_squared_errors = 0.0;
-        
-                for i in 0..self.n_data.len() {
-                    let n_val = self.n_data[i];
-                    let empirical_f_disk = self.f_disk_data[i];
-                    let predicted_f_disk = 1.0 / (1.0 + a * (n_val.powf(b)));
-                    sum_squared_errors += (predicted_f_disk - empirical_f_disk).powi(2);
-                }
-                Ok(sum_squared_errors)
+    
+        // Separate the data into two vectors:
+        let n_values: Vec<f64> = data.iter().map(|&(n, _)| n).collect();
+        let f_values: Vec<f64> = data.iter().map(|&(_, f)| f).collect();
+
+        // Define the cost function (sum of squared errors).
+        // For each measured data point (n, f_emp), the model predicts:
+        //    f_pred = 1 / (1 + a * n^b)
+        // and we accumulate (f_pred - f_emp)^2.
+        let cost = |a: f64, b: f64| -> f64 {
+            n_values.iter()
+                .zip(f_values.iter())
+                .fold(0.0, |acc, (&n, &f_emp)| {
+                    let f_pred = 1.0 / (1.0 + a * n.powf(b));
+                    acc + (f_pred - f_emp).powi(2)
+                })
+        };
+    
+        // Compute numerical gradients using central differences.
+        let gradient = |a: f64, b: f64| -> (f64, f64) {
+            let eps = 1e-6;
+            let cost_a_plus = cost(a + eps, b);
+            let cost_a_minus = cost(a - eps, b);
+            let grad_a = (cost_a_plus - cost_a_minus) / (2.0 * eps);
+            let cost_b_plus = cost(a, b + eps);
+            let cost_b_minus = cost(a, b - eps);
+            let grad_b = (cost_b_plus - cost_b_minus) / (2.0 * eps);
+            (grad_a, grad_b)
+        };
+    
+        // --- Optimization Settings ---
+        let max_iters = 1000;
+        let tol = 1e-9;
+        let mut learning_rate = 1e-3; // initial learning rate
+    
+        // Initial guesses for a and b.
+        let mut a = 0.01;
+        let mut b = 1.0;
+    
+        let mut current_cost = cost(a, b);
+        println!("Initial cost: {:.12}", current_cost);
+    
+        // Begin gradient descent loop.
+        for iter in 0..max_iters {
+            // Compute the gradient.
+            let (grad_a, grad_b) = gradient(a, b);
+            let grad_norm = (grad_a.powi(2) + grad_b.powi(2)).sqrt();
+    
+            // If the gradient is very small, assume convergence.
+            if grad_norm < tol {
+                println!("Convergence reached at iteration {} (grad_norm = {:.12}).", iter, grad_norm);
+                break;
             }
-        }
-        
-        impl argmin::core::Gradient for DiskEfficiencyFunc {
-            type Param = Array1<f64>;
-            type Gradient = Array1<f64>;
-        
-            fn gradient(&self, p: &Self::Param) -> Result<Self::Gradient, Error> {
-                let epsilon = 1e-6;
-                let mut grad = p.clone();
-                for i in 0..p.len() {
-                    let mut p_eps = p.clone();
-                    p_eps[i] += epsilon;
-                    let cost1 = self.cost(p)?;
-                    let cost2 = self.cost(&p_eps)?;
-                    grad[i] = (cost2 - cost1) / epsilon;
-                }
-                Ok(grad)
+    
+            // Backtracking line search: try reducing the step if cost does not decrease.
+            let mut step = learning_rate;
+            let mut new_a = a - step * grad_a;
+            let mut new_b = b - step * grad_b;
+            // Project parameters to remain positive.
+            new_a = new_a.max(1e-6);
+            new_b = new_b.max(1e-6);
+            let mut new_cost = cost(new_a, new_b);
+    
+            // Reduce the step size until the cost decreases.
+            while new_cost > current_cost && step > 1e-12 {
+                step *= 0.5;
+                new_a = a - step * grad_a;
+                new_b = b - step * grad_b;
+                new_a = new_a.max(1e-6);
+                new_b = new_b.max(1e-6);
+                new_cost = cost(new_a, new_b);
             }
+    
+            // If no improvement is possible, break.
+            if new_cost >= current_cost {
+                println!("No improvement found at iteration {} (cost: {:.12}).", iter, current_cost);
+                break;
+            }
+    
+            // Accept the new parameters.
+            a = new_a;
+            b = new_b;
+            println!(
+                "Iter {:>4}: cost = {:.12}, a = {:.8}, b = {:.8}, grad_norm = {:.12}, step = {:.8}",
+                iter, new_cost, a, b, grad_norm, step
+            );
+    
+            // Check for convergence based on cost improvement.
+            if (current_cost - new_cost).abs() < tol {
+                println!("Cost improvement below tolerance at iteration {}.", iter);
+                current_cost = new_cost;
+                break;
+            }
+    
+            current_cost = new_cost;
         }
-
-        // Optimization Problem Setup (Argmin)
-        let cost_function = DiskEfficiencyFunc { n_data: n_data.clone(), f_disk_data: f_disk_data.clone() };
-        let initial_params = Array1::from_vec(vec![0.01, 1.0]); // Initial guess: for convergence
-        let solver = BFGS::new(argmin::solver::linesearch::MoreThuenteLineSearch::new());
-
-        // Run Optimizer
-        let res = Executor::new(cost_function, solver)
-            .run()
-            .unwrap();
-
-        // Extract Fitted Parameters
-        let best_params = res.state.best_param.clone().unwrap(); // Directly access best_param
-        let a_fitted = best_params[0];
-        let b_fitted = best_params[1];
-
-        println!("\n--- Fitted Parameters for f_disk(n) = 1 / (1 + a * n^b) ---");
-        println!("F_DISK_A_FIT = {:.8}", a_fitted);  // Use in main.rs
-        println!("F_DISK_B_FIT = {:.8}", b_fitted);  // Use in main.rs
-
-        assert!(a_fitted > 0.0, "Fitted parameter 'a' should be positive");
-        assert!(b_fitted > 0.0, "Fitted parameter 'b' should be positive");
+    
+        println!("\n--- Fitted Parameters for f_disk(n) = 1/(1 + a * n^b) ---");
+        println!("F_DISK_A_FIT = {:.8}", a);
+        println!("F_DISK_B_FIT = {:.8}", b);
+    
+        // Sanity checks: ensure both parameters are positive.
+        assert!(a > 0.0, "Fitted parameter 'a' should be positive; got {:.8}", a);
+        assert!(b > 0.0, "Fitted parameter 'b' should be positive; got {:.8}", b);
     }
+
 }
 
 // cargo test --release -- --nocapture
