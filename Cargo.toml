@@ -21,6 +21,32 @@ num_cpus = "1.16.0"
 rand = "0.9.0"
 ndarray = "0.16.1"
 argmin = "0.10.0"
-argmin-math   = { version = "0.4.0", features = ["ndarray_latest"] }
-plotters = "0.3.7"
 statrs = "0.18.0"
+argmin-math   = { version = "0.4.0", features = ["ndarray_latest"] }
+plotters = { 
+    version = "0.3.7", 
+    default-features = false, 
+    features = [
+        "all_elements",
+        "all_series",
+        "bitmap_backend",
+        "bitmap_encoder",
+        "bitmap_gif",
+        "chrono",
+        "colormaps",
+        "deprecated_items",
+        "full_palette",
+        "image",
+        "svg_backend",
+        "boxplot",
+        "candlestick",
+        "errorbar",
+        "histogram",
+        "area_series",
+        "line_series",
+        "point_series",
+        "surface_series",
+        "plotters-bitmap",
+        "plotters-svg"
+    ]
+}
