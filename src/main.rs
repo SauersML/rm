@@ -956,4 +956,114 @@ mod test_prediction {
     }
 }
 
+// cargo test --release -- --nocapture test_model_prediction_accuracy
+#[cfg(test)]
+mod test_grid {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+    use tempfile::tempdir;
+    use rand::{Rng, thread_rng};
+
+    const TEST_FILE_SIZE_KB: usize = 1;
+    const NUM_TEST_FILES: usize = 100; // Default, will be overridden in tests
+
+    /// Creates a set of test files in the given directory.
+    fn create_test_files(dir: &Path, count: usize) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        for i in 0..count {
+            let file_path = dir.join(format!("test_file_{}.dat", i));
+            let mut file = File::create(&file_path).unwrap();
+            // Write TEST_FILE_SIZE_KB kilobytes of zeros.
+            file.write_all(&vec![0u8; TEST_FILE_SIZE_KB * 1024]).unwrap();
+            paths.push(file_path);
+        }
+        paths
+    }
+
+     /// Measures how long it takes to delete the given files concurrently with a concurrency level of `n`.
+    fn measure_concurrent_deletion_time(n: usize, files: Vec<PathBuf>) -> Duration {
+        let start = Instant::now();
+        let runtime = tokio::runtime::Builder::new_multi_thread() //Default runtime.
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            futures::stream::iter(files)
+                .for_each_concurrent(Some(n), |path| async move {
+                    if let Err(e) = unlink_file(&path) {
+                        if e.kind() != std::io::ErrorKind::NotFound{
+                            panic!("Failed to delete '{}': {}", path.display(), e);
+                        }
+
+                    }
+                })
+                .await;
+        });
+        start.elapsed()
+    }
+
+    #[test]
+    fn test_grid_search() {
+        let simulated_cpu_counts = [1, 2, 4, 8, 16, 32, 64]; // Example simulated CPU counts
+        let file_counts = [10, 100, 1000, 10000]; // Example file counts
+        let max_concurrency_multiplier = 4; // Test up to 4x simulated CPUs
+
+        println!("\n[Grid Search Test] Running...");
+
+        for &simulated_cpus in &simulated_cpu_counts {
+            // Create a new Tokio runtime for each simulated CPU count
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(simulated_cpus) // Set the number of worker threads
+                .build()
+                .unwrap();
+
+            for &num_files in &file_counts {
+                let tmp_dir = tempdir().unwrap();
+                let pattern = tmp_dir.path().to_str().unwrap();
+                let files = create_test_files(tmp_dir.path(), num_files);
+
+
+                let mut min_time = Duration::MAX;
+                let mut optimal_concurrency = 1;
+
+                for concurrency in 1..=(max_concurrency_multiplier * simulated_cpus) {
+                    let start = Instant::now();
+                    runtime.block_on(run_deletion(pattern, Some(concurrency))).unwrap(); // Pass concurrency
+                    let elapsed = start.elapsed();
+
+                    println!(
+                        "  Simulated CPUs: {}, Files: {}, Concurrency: {}, Time: {:?}",
+                        simulated_cpus, num_files, concurrency, elapsed
+                    );
+
+                    if elapsed < min_time {
+                        min_time = elapsed;
+                        optimal_concurrency = concurrency;
+                    }
+                }
+                // Manually clean up files since they are not being auto cleaned up correctly by tempfile.
+                for file in files{
+                  if let Err(e) = std::fs::remove_file(&file){
+                    if e.kind() != std::io::ErrorKind::NotFound{
+                      panic!("Failed to delete file during cleanup. File: {}, Error: {}", file.display(), e)
+                    }
+                  }
+                }
+
+                println!(
+                    "[Grid Search Test] Optimal Concurrency (Simulated CPUs: {}, Files: {}): {}",
+                    simulated_cpus, num_files, optimal_concurrency
+                );
+            }
+        }
+
+        println!("[Grid Search Test] Complete.");
+    }
+}
+
 // cargo test --release -- --nocapture
