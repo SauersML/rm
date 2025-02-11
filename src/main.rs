@@ -202,13 +202,42 @@ mod performance_tests {
     use tempfile::tempdir;
     use tokio::runtime::Builder;
 
-    /// Creates a specified number of files in `dir`, each of size `size_kb` kilobytes.
+    /// Creates a specified number of files in `dir`, each of size `size_kb` kilobytes,
+    /// using the standard naming scheme.
     fn create_test_files(dir: &Path, count: usize, size_kb: usize) -> Vec<PathBuf> {
         let mut paths = Vec::with_capacity(count);
         for i in 0..count {
             let file_path = dir.join(format!("test_file_{}.dat", i));
             let mut f = File::create(&file_path).unwrap();
-            // Write `size_kb * 1024` bytes of zeros.
+            f.write_all(&vec![0u8; size_kb * 1024]).unwrap();
+            paths.push(file_path);
+        }
+        paths
+    }
+
+    /// Converts a number to a minimal base-36 string.
+    fn to_base36(mut num: usize) -> String {
+        const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        if num == 0 {
+            return "0".to_string();
+        }
+        let mut buf = Vec::new();
+        while num > 0 {
+            buf.push(DIGITS[num % 36]);
+            num /= 36;
+        }
+        buf.reverse();
+        String::from_utf8(buf).unwrap()
+    }
+
+    /// Creates a specified number of files in `dir`, each of size `size_kb` kilobytes,
+    /// using a minimal naming scheme (short names) so that the overall argument list size is reduced.
+    fn create_short_test_files(dir: &Path, count: usize, size_kb: usize) -> Vec<PathBuf> {
+        let mut paths = Vec::with_capacity(count);
+        for i in 0..count {
+            let filename = to_base36(i);
+            let file_path = dir.join(filename);
+            let mut f = File::create(&file_path).unwrap();
             f.write_all(&vec![0u8; size_kb * 1024]).unwrap();
             paths.push(file_path);
         }
@@ -233,7 +262,6 @@ mod performance_tests {
         if !remaining.is_empty() {
             panic!("Rust deletion failed: {} files remain", remaining.len());
         }
-
         elapsed
     }
 
@@ -241,6 +269,7 @@ mod performance_tests {
     /// Uses the shell for glob expansion and verifies deletion afterward.
     fn measure_rm_deletion(pattern: &str) -> f64 {
         let start = Instant::now();
+        // Using the shell to allow glob expansion.
         let cmd = format!("rm -f {}", pattern);
         let output = Command::new("sh")
             .arg("-c")
@@ -258,11 +287,10 @@ mod performance_tests {
         if !remaining.is_empty() {
             panic!("rm deletion failed: {} files remain", remaining.len());
         }
-
         elapsed
     }
 
-    /// Formats a duration in seconds to a human-friendly string (ms if < 1 second).
+    /// Formats a duration (in seconds) to a human-friendly string (ms if < 1 second).
     fn format_duration(seconds: f64) -> String {
         if seconds < 1.0 {
             format!("{:.3} ms", seconds * 1000.0)
@@ -271,7 +299,7 @@ mod performance_tests {
         }
     }
 
-    /// Structure to hold the benchmark results for one test scenario.
+    /// Structure to hold benchmark results.
     struct BenchmarkResult {
         test_name: String,
         file_count: usize,
@@ -280,28 +308,47 @@ mod performance_tests {
         rm_time: f64,
     }
 
-    /// Runs a benchmark scenario by creating files, measuring both Rust and `rm` deletion times, and returning the results.
-    fn run_benchmark(test_name: &str, file_count: usize, file_size_kb: usize) -> BenchmarkResult {
+    /// Runs a benchmark scenario by creating files, measuring both Rust and `rm` deletion times,
+    /// and returning the results.
+    ///
+    /// If `use_short_names` is true, files are created with a minimal naming scheme and the glob
+    /// pattern is adjusted accordingly. This is used for the very high file count test so that the
+    /// expanded argument list approaches (but does not exceed) the ARG_MAX limit.
+    fn run_benchmark(
+        test_name: &str,
+        file_count: usize,
+        file_size_kb: usize,
+        use_short_names: bool,
+    ) -> BenchmarkResult {
         let tmp = tempdir().unwrap();
         let base_path = tmp.path().to_path_buf();
-        // The glob pattern used by both deletion methods.
-        let pattern = base_path.join("test_file_*.dat");
-        let pattern_str = pattern.to_string_lossy().to_string();
+
+        // Choose the creation function and glob pattern based on the naming scheme.
+        let (pattern_str, create_files_fn): (String, fn(&Path, usize, usize) -> Vec<PathBuf>) =
+            if use_short_names {
+                // With minimal names the files are very short.
+                // The glob pattern below matches filenames composed only of digits and lowercase letters.
+                let pattern = base_path.join("[0-9a-z]*");
+                (pattern.to_string_lossy().to_string(), create_short_test_files)
+            } else {
+                let pattern = base_path.join("test_file_*.dat");
+                (pattern.to_string_lossy().to_string(), create_test_files)
+            };
 
         println!("\n--- {} ---", test_name);
         println!(
             "Creating {} files ({} KB each)...",
             file_count, file_size_kb
         );
-        // Create files for Rust deletion.
-        create_test_files(&base_path, file_count, file_size_kb);
+        // Create files for the Rust deletion test.
+        create_files_fn(&base_path, file_count, file_size_kb);
 
         println!("Running Rust deletion...");
         let rust_time = measure_rust_deletion(&pattern_str);
         println!("Rust deletion completed in {}", format_duration(rust_time));
 
         // Recreate files for the rm deletion test.
-        create_test_files(&base_path, file_count, file_size_kb);
+        create_files_fn(&base_path, file_count, file_size_kb);
         println!("Running rm deletion...");
         let rm_time = measure_rm_deletion(&pattern_str);
         println!("rm deletion completed in {}", format_duration(rm_time));
@@ -320,25 +367,36 @@ mod performance_tests {
     fn performance_summary() {
         println!("\n===== Starting Performance Benchmarks =====");
 
-        // Run benchmark scenarios.
         let mut results = Vec::new();
-        results.push(run_benchmark("Small files (10 x 1 KB)", 10, 1));
-        results.push(run_benchmark("Many small files (50,000 x 1 KB)", 50_000, 1));
-        results.push(run_benchmark("Large files (100 x 10 MB)", 100, 10240));
+        // A small test using the standard (long) naming scheme.
+        results.push(run_benchmark("Small files (10 x 1 KB)", 10, 1, false));
+        // For the high file count test, use the short naming scheme so that the total argument length
+        // approaches the ARG_MAX limit without exceeding it.
+        results.push(run_benchmark(
+            "Many small files (300,000 x 1 KB)",
+            300_000,
+            1,
+            true,
+        ));
+        // A test with large files.
+        results.push(run_benchmark("Large files (100 x 10 MB)", 100, 10240, false));
 
-        // Print the final summary table.
         println!("\n===== Performance Summary =====\n");
         println!(
-            "{:<35} | {:>10} | {:>10} | {:>10} | {:>10}",
+            "{:<45} | {:>10} | {:>10} | {:>10} | {:>10}",
             "Test Scenario", "Rust", "rm", "Diff", "Winner"
         );
-        println!("{}", "-".repeat(85));
+        println!("{}", "-".repeat(95));
 
         for res in results {
             let diff = (res.rust_time - res.rm_time).abs();
-            let winner = if res.rust_time < res.rm_time { "Rust" } else { "rm" };
+            let winner = if res.rust_time < res.rm_time {
+                "Rust"
+            } else {
+                "rm"
+            };
             println!(
-                "{:<35} | {:>10} | {:>10} | {:>10} | {:>10}",
+                "{:<45} | {:>10} | {:>10} | {:>10} | {:>10}",
                 res.test_name,
                 format_duration(res.rust_time),
                 format_duration(res.rm_time),
@@ -346,7 +404,7 @@ mod performance_tests {
                 winner
             );
         }
-        println!("{}", "-".repeat(85));
+        println!("{}", "-".repeat(95));
         println!("Note: Times are measured in seconds (or ms if < 1 second).");
     }
 
@@ -358,7 +416,6 @@ mod performance_tests {
         let base_path = tmp.path().to_string_lossy().to_string();
         let pattern = format!("{}/no_such_file_*.dat", base_path);
 
-        // This should complete quickly since there are no files to delete.
         let rust_time = measure_rust_deletion(&pattern);
         println!(
             "Rust deletion with no matches completed in {}.",
@@ -374,7 +431,6 @@ mod performance_tests {
         let dir_path = tmp.path().join("my_test_dir");
         fs::create_dir(&dir_path).unwrap();
 
-        // Also create a file that matches the pattern.
         let file_path = tmp.path().join("my_test_dir_file.dat");
         File::create(&file_path).unwrap();
 
@@ -387,11 +443,11 @@ mod performance_tests {
             format_duration(rust_time)
         );
 
-        // Verify that the directory still exists and the file has been deleted.
         assert!(dir_path.is_dir(), "Directory was deleted!");
         assert!(!file_path.exists(), "File was not deleted!");
     }
 }
+
 
 #[cfg(test)]
 mod empirical_tests {
