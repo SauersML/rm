@@ -11,7 +11,6 @@ use std::{
 
 use futures::{stream, StreamExt};
 use glob::glob;
-use indicatif::{ProgressBar, ProgressStyle};
 use num_cpus;
 use tokio::runtime::Builder;
 use std::os::unix::ffi::OsStrExt;
