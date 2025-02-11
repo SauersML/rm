@@ -16,15 +16,6 @@ use num_cpus;
 use tokio::runtime::Builder;
 use std::os::unix::ffi::OsStrExt;
 
-// ===========================
-// HARDCODED CONSTANTS (from empirical tests):
-const T_CONVERSION_NS: f64 = 116.56;
-const T_SYSCALL_NS: f64 = 113356.65;
-const T_OVERHEAD_NS: f64 = 16538.87;
-const F_DISK_A_FIT: f64 = 0.31238476;
-const F_DISK_B_FIT: f64 = 1.20621366;
-// ===========================
-
 
 /// Delete a single file via a direct `unlink` (libc) call.
 fn unlink_file(path: &Path) -> io::Result<()> {
@@ -40,15 +31,14 @@ fn unlink_file(path: &Path) -> io::Result<()> {
 }
 
 /// Compute the optimal concurrency level. FLAWED.
-fn compute_optimal_concurrency(num_files: usize, t_syscall_ns: f64, t_overhead_ns: f64) -> usize {
+fn compute_optimal_concurrency(num_files: usize) -> usize {
     if num_files == 0 {
         return 1;
     }
 
     let n_cpus = num_cpus::get();
 
-    // n_opt = sqrt( (N * T_syscall) / T_overhead )
-    let raw_value = ((num_files as f64) * t_syscall_ns / t_overhead_ns).sqrt();
+    let raw_value = (num_files as f64) + (n_cpus as f64);
     let candidate_n = raw_value.round() as usize;
 
     // Limit concurrency to the number of CPU cores, and make sure it's at least 1.
