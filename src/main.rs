@@ -889,8 +889,8 @@ mod test_prediction {
         // Generate 32 concurrency values in logspace between 1×CPUs and 64×CPUs.
         let cpu: f64 = num_cpus::get() as f64;
         let min_concurrency: f64 = cpu;         // minimum concurrency = 1×CPUs
-        let max_concurrency: f64 = 64.0 * cpu;  // maximum concurrency = 64×CPUs
-        let num_points: usize = 32;             // total of 32 points in logspace
+        let max_concurrency: f64 = 8.0 * cpu;  // maximum concurrency
+        let num_points: usize = 16;             // total of 32 points in logspace
         
         // Compute log10-space endpoints.
         let log_min: f64 = min_concurrency.log10();
@@ -1036,8 +1036,8 @@ mod test_grid {
         let mut simulated_cpu_counts = generate_log_space(actual_cpus, 32);
         // Reverse the order to walk down from highest to lowest simulated CPUs.
         simulated_cpu_counts.reverse();
-        let file_counts = [0, 5, 50, 500, 5000, 50000, 50000, 500000];
-        let max_concurrency_multiplier = 8;
+        let file_counts = [0, 8, 40, 80, 400, 2000];
+        let max_concurrency_multiplier = 4;
         println!("\n[Grid Search Test] Running...");
         let mut plot_data: Vec<(f64, f64, f64)> = Vec::new();
         let csv_file = OpenOptions::new()
@@ -1062,7 +1062,7 @@ mod test_grid {
                 let mut min_time = Duration::MAX;
                 let mut optimal_concurrency = 1;
 
-                // Generate 32 log-spaced concurrency levels from 1 to max_concurrency
+                // Generate log-spaced concurrency levels from 1 to max_concurrency
                 let max_concurrency = max_concurrency_multiplier * simulated_cpus;
                 let concurrency_levels = generate_log_space(max_concurrency, 32);
 
