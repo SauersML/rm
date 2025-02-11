@@ -40,7 +40,7 @@ fn unlink_file(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Compute the optimal concurrency level.
+/// Compute the optimal concurrency level. FLAWED.
 fn compute_optimal_concurrency(num_files: usize, t_syscall_ns: f64, t_overhead_ns: f64) -> usize {
     if num_files == 0 {
         return 1;
@@ -58,7 +58,7 @@ fn compute_optimal_concurrency(num_files: usize, t_syscall_ns: f64, t_overhead_n
 }
 
 /// Main async entry point.
-async fn run_deletion(pattern: &str) -> io::Result<()> {
+async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io::Result<()> {
     // Gather files
     let mut files = Vec::new();
     for entry in glob(pattern).map_err(|e| {
@@ -85,8 +85,12 @@ async fn run_deletion(pattern: &str) -> io::Result<()> {
         return Ok(());
     }
 
-    // Compute optimal concurrency
-    let concurrency = compute_optimal_concurrency(total_files, T_SYSCALL_NS, T_OVERHEAD_NS);
+    // Compute optimal concurrency, or use override
+    let concurrency = match concurrency_override {
+        Some(n) => n,
+        None => compute_optimal_concurrency(total_files, T_SYSCALL_NS, T_OVERHEAD_NS),
+    };
+
     println!(
         "[INFO] Deleting {} files with concurrency = {} (CPU cores = {})",
         total_files,
