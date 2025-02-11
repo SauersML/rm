@@ -1036,7 +1036,7 @@ mod test_grid {
         let mut simulated_cpu_counts = generate_log_space(actual_cpus, 32);
         // Reverse the order to walk down from highest to lowest simulated CPUs.
         simulated_cpu_counts.reverse();
-        let file_counts = [1, 10, 100, 1000, 10000, 100000, 100000];
+        let file_counts = [0, 5, 50, 500, 5000, 50000, 50000, 500000];
         let max_concurrency_multiplier = 8;
         println!("\n[Grid Search Test] Running...");
         let mut plot_data: Vec<(f64, f64, f64)> = Vec::new();
