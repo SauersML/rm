@@ -664,29 +664,32 @@ mod test_prediction {
     use super::*;
     use std::fs::File;
     use std::io::Write;
-    use std::path::PathBuf;
-    use std::time::Instant;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
-    use rand::Rng;
+    use rand::{Rng, thread_rng};
     use plotters::prelude::*;
     use statrs::statistics::Statistics;
-    use statrs::statistics::Correlation;
 
     const TEST_FILE_SIZE_KB: usize = 1;
     const NUM_TEST_FILES: usize = 100;
     const NUMBER_OF_SCENARIOS: usize = 500;
 
+    /// Creates a set of test files in the given directory.
+    /// Each file is filled with zero bytes, and its size is determined by the constant `TEST_FILE_SIZE_KB`.
     fn create_test_files(dir: &Path, count: usize) -> Vec<PathBuf> {
         let mut paths = Vec::new();
         for i in 0..count {
             let file_path = dir.join(format!("test_file_{}.dat", i));
             let mut file = File::create(&file_path).unwrap();
+            // Write TEST_FILE_SIZE_KB kilobytes (1024 bytes per KB) of zeros.
             file.write_all(&vec![0u8; TEST_FILE_SIZE_KB * 1024]).unwrap();
             paths.push(file_path);
         }
         paths
     }
 
+    /// Measures how long it takes to delete the given files concurrently with a concurrency level of `n`.
     fn measure_concurrent_deletion_time(n: usize, files: Vec<PathBuf>) -> Duration {
         let start = Instant::now();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -698,7 +701,7 @@ mod test_prediction {
             futures::stream::iter(files)
                 .for_each_concurrent(Some(n), |path| async move {
                     if let Err(e) = unlink_file(&path) {
-                        if e.kind() != std::io::ErrorKind::NotFound{
+                        if e.kind() != std::io::ErrorKind::NotFound {
                             panic!("Failed to delete '{}': {}", path.display(), e);
                         }
                     }
@@ -713,10 +716,30 @@ mod test_prediction {
         1.0 / (1.0 + F_DISK_A_FIT * (n as f64).powf(F_DISK_B_FIT))
     }
 
+    /// Computes the Pearson correlation coefficient between two slices.
+    /// Returns `None` if the slices differ in length, are empty, or the denominator is zero.
+    fn pearson_correlation(xs: &[f64], ys: &[f64]) -> Option<f64> {
+        if xs.len() != ys.len() || xs.is_empty() {
+            return None;
+        }
+        let n = xs.len() as f64;
+        let sum_x: f64 = xs.iter().sum();
+        let sum_y: f64 = ys.iter().sum();
+        let sum_xy: f64 = xs.iter().zip(ys).map(|(x, y)| x * y).sum();
+        let sum_x2: f64 = xs.iter().map(|x| x * x).sum();
+        let sum_y2: f64 = ys.iter().map(|y| y * y).sum();
+
+        let numerator = n * sum_xy - sum_x * sum_y;
+        let denominator = ((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y)).sqrt();
+        if denominator == 0.0 {
+            None
+        } else {
+            Some(numerator / denominator)
+        }
+    }
 
     #[test]
     fn test_model_prediction_accuracy() {
-
         let mut predicted_times: Vec<f64> = Vec::with_capacity(NUMBER_OF_SCENARIOS);
         let mut actual_times: Vec<f64> = Vec::with_capacity(NUMBER_OF_SCENARIOS);
 
@@ -725,36 +748,39 @@ mod test_prediction {
         println!("\n[Model Accuracy Test] Running {} Scenarios...", NUMBER_OF_SCENARIOS);
 
         for _ in 0..NUMBER_OF_SCENARIOS {
+            // Generate random concurrency level and number of files.
             let n = thread_rng().gen_range(1..=num_cpus::get());
             let num_files = thread_rng().gen_range(1..=1000);
-            let files = create_test_files(tmp_dir.path(), num_files, TEST_FILE_SIZE_KB);
+            // Note: Only two arguments are passed here.
+            let files = create_test_files(tmp_dir.path(), num_files);
 
             let predicted_time_ns = (num_files as f64 * T_CONVERSION_NS)
                 + (num_files as f64 * T_SYSCALL_NS) / (n as f64 * f_disk(n))
                 + (n as f64 * T_OVERHEAD_NS);
 
-            let actual_time_duration = measure_concurrent_deletion_time(n, files);
+            let actual_time_duration = measure_concurrent_deletion_time(n, files.clone());
             let actual_time_ns = actual_time_duration.as_nanos() as f64;
 
             predicted_times.push(predicted_time_ns / 1_000_000.0);
             actual_times.push(actual_time_ns / 1_000_000.0);
 
-            //Manually clean up files since they are not being tracked by tempfile after being added to files vec
-             for file in &files {
-                if let Err(e) = std::fs::remove_file(file) {
-                        if e.kind() != std::io::ErrorKind::NotFound {
+            // Manually clean up files since they might not be auto-deleted by tempfile.
+            for file in files {
+                if let Err(e) = std::fs::remove_file(&file) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
                         panic!("Failed to delete during cleanup, file: {}. Error: {}", file.display(), e);
                     }
                 }
             }
         }
 
-
-        let root = BitMapBackend::new("prediction_vs_actual.png", (1024, 768)).into_drawing_area();
+        let root = BitMapBackend::new("prediction_vs_actual.png", (1024, 768))
+            .into_drawing_area();
         root.fill(&WHITE).unwrap();
 
-        let max_time = predicted_times.iter().cloned().fold(0.0, f64::max)
-            .max(actual_times.iter().cloned().fold(0.0, f64::max));
+        let max_predicted = predicted_times.iter().cloned().fold(0.0, f64::max);
+        let max_actual = actual_times.iter().cloned().fold(0.0, f64::max);
+        let max_time = max_predicted.max(max_actual);
 
         let mut chart = ChartBuilder::on(&root)
             .caption("Predicted vs. Actual Deletion Time", ("sans-serif", 50).into_font())
@@ -764,52 +790,57 @@ mod test_prediction {
             .build_cartesian_2d(0.0..max_time, 0.0..max_time)
             .unwrap();
 
-        chart.configure_mesh()
+        chart
+            .configure_mesh()
             .x_desc("Predicted Time (ms)")
             .y_desc("Actual Time (ms)")
             .draw()
             .unwrap();
 
-        chart.draw_series(
-            predicted_times.iter().zip(actual_times.iter()).map(|(&x, &y)| {
-                Circle::new((x, y), 3, BLUE.filled())
-            })
-        ).unwrap();
+        chart
+            .draw_series(
+                predicted_times
+                    .iter()
+                    .zip(actual_times.iter())
+                    .map(|(&x, &y)| Circle::new((x, y), 3, BLUE.filled())),
+            )
+            .unwrap();
 
-        chart.draw_series(LineSeries::new(
-            (0..=max_time.ceil() as i32).map(|x| (x as f64, x as f64)),
-            &RED
-        )).unwrap()
-        .label("Perfect Prediction (y=x)")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
+        chart
+            .draw_series(LineSeries::new(
+                (0..=max_time.ceil() as i32).map(|x| (x as f64, x as f64)),
+                &RED,
+            ))
+            .unwrap()
+            .label("Perfect Prediction (y=x)")
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
 
-        chart.configure_series_labels()
+        chart
+            .configure_series_labels()
             .border_style(&BLACK)
             .background_style(&WHITE.mix(0.8))
-            .draw().unwrap();
+            .draw()
+            .unwrap();
 
         root.present().expect("Unable to write result to file, please make sure 'plotters' feature is enabled.");
         println!("Scatter plot saved to prediction_vs_actual.png");
 
         // --- Statistical Analysis ---
-        let correlation_coefficient = if predicted_times.len() == actual_times.len() && !predicted_times.is_empty() {
-            let predicted_series = statrs::statistics::Series::from_slice(&predicted_times);
-            let actual_series = statrs::statistics::Series::from_slice(&actual_times);
-            
-            match statrs::statistics::Correlation::pearson(&predicted_series, &actual_series) {
-                Ok(coeff) => coeff,
-                Err(_) => {
-                    eprintln!("Error calculating Pearson correlation.");
-                    f64::NAN
-                }
-            }
-        } else {
-            f64::NAN
-        };
+        let correlation_coefficient = pearson_correlation(&predicted_times, &actual_times)
+            .unwrap_or(f64::NAN);
         println!("\n[Model Accuracy Test] --- Results ---");
-        println!("[Model Accuracy Test] Average Predicted Time: {:.2} ms", predicted_times.iter().sum::<f64>() / NUMBER_OF_SCENARIOS as f64);
-        println!("[Model Accuracy Test] Average Actual Time: {:.2} ms", actual_times.iter().sum::<f64>() / NUMBER_OF_SCENARIOS as f64);
-        println!("[Model Accuracy Test] Pearson Correlation Coefficient (Predicted vs Actual Time): {:.6}", correlation_coefficient);
+        println!(
+            "[Model Accuracy Test] Average Predicted Time: {:.2} ms",
+            predicted_times.iter().sum::<f64>() / NUMBER_OF_SCENARIOS as f64
+        );
+        println!(
+            "[Model Accuracy Test] Average Actual Time: {:.2} ms",
+            actual_times.iter().sum::<f64>() / NUMBER_OF_SCENARIOS as f64
+        );
+        println!(
+            "[Model Accuracy Test] Pearson Correlation Coefficient (Predicted vs Actual Time): {:.6}",
+            correlation_coefficient
+        );
     }
 }
 
