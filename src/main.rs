@@ -77,7 +77,7 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
     // Compute optimal concurrency, or use override
     let concurrency = match concurrency_override {
         Some(n) => n,
-        None => compute_optimal_concurrency(total_files, T_SYSCALL_NS, T_OVERHEAD_NS),
+        None => compute_optimal_concurrency(total_files),
     };
 
     println!(
@@ -1003,7 +1003,9 @@ mod test_grid {
     #[test]
     fn test_grid_search() {
         let actual_cpus = num_cpus::get();
-        let simulated_cpu_counts = generate_log_space(actual_cpus, 32);
+        let mut simulated_cpu_counts = generate_log_space(actual_cpus, 32);
+        // Reverse the order to walk down from highest to lowest simulated CPUs.
+        simulated_cpu_counts.reverse();
         let file_counts = [10, 100, 1000, 10000, 100000];
         let max_concurrency_multiplier = 8;
         println!("\n[Grid Search Test] Running...");
