@@ -755,7 +755,7 @@ mod test_prediction {
         // then measure predicted and actual deletion times.
         for _ in 0..NUMBER_OF_SCENARIOS {
             // Generate random concurrency level and number of files.
-            let n = thread_rng().gen_range(1..=num_cpus::get());
+            let n = thread_rng().gen_range(1..=16*num_cpus::get());
             let num_files = thread_rng().gen_range(1..=1000);
             concurrency_levels.push(n);
             file_counts.push(num_files);
