@@ -740,30 +740,38 @@ mod test_prediction {
 
     #[test]
     fn test_model_prediction_accuracy() {
+        // Vectors to collect our scenario data.
         let mut predicted_times: Vec<f64> = Vec::with_capacity(NUMBER_OF_SCENARIOS);
         let mut actual_times: Vec<f64> = Vec::with_capacity(NUMBER_OF_SCENARIOS);
-
+        let mut concurrency_levels: Vec<usize> = Vec::with_capacity(NUMBER_OF_SCENARIOS);
+        let mut file_counts: Vec<usize> = Vec::with_capacity(NUMBER_OF_SCENARIOS);
+    
         let tmp_dir = tempdir().unwrap();
-
+    
         println!("\n[Model Accuracy Test] Running {} Scenarios...", NUMBER_OF_SCENARIOS);
-
+    
+        // For each scenario, generate a random concurrency level (n) and random number of files,
+        // then measure predicted and actual deletion times.
         for _ in 0..NUMBER_OF_SCENARIOS {
             // Generate random concurrency level and number of files.
             let n = thread_rng().gen_range(1..=num_cpus::get());
             let num_files = thread_rng().gen_range(1..=1000);
-            // Note: Only two arguments are passed here.
+            concurrency_levels.push(n);
+            file_counts.push(num_files);
+    
+            // Create the files (using only two arguments; the file size is fixed by TEST_FILE_SIZE_KB).
             let files = create_test_files(tmp_dir.path(), num_files);
-
+    
             let predicted_time_ns = (num_files as f64 * T_CONVERSION_NS)
                 + (num_files as f64 * T_SYSCALL_NS) / (n as f64 * f_disk(n))
                 + (n as f64 * T_OVERHEAD_NS);
-
+    
             let actual_time_duration = measure_concurrent_deletion_time(n, files.clone());
             let actual_time_ns = actual_time_duration.as_nanos() as f64;
-
-            predicted_times.push(predicted_time_ns / 1_000_000.0);
-            actual_times.push(actual_time_ns / 1_000_000.0);
-
+    
+            predicted_times.push(predicted_time_ns / 1_000_000.0); // convert ns to ms
+            actual_times.push(actual_time_ns / 1_000_000.0); // convert ns to ms
+    
             // Manually clean up files since they might not be auto-deleted by tempfile.
             for file in files {
                 if let Err(e) = std::fs::remove_file(&file) {
@@ -773,31 +781,32 @@ mod test_prediction {
                 }
             }
         }
-
-        let root = BitMapBackend::new("prediction_vs_actual.png", (1024, 768))
+    
+        // --- Plot 1: Predicted vs. Actual Deletion Time ---
+        let root1 = BitMapBackend::new("prediction_vs_actual.png", (1024, 768))
             .into_drawing_area();
-        root.fill(&WHITE).unwrap();
-
+        root1.fill(&WHITE).unwrap();
+    
         let max_predicted = predicted_times.iter().cloned().fold(0.0, f64::max);
         let max_actual = actual_times.iter().cloned().fold(0.0, f64::max);
         let max_time = max_predicted.max(max_actual);
-
-        let mut chart = ChartBuilder::on(&root)
+    
+        let mut chart1 = ChartBuilder::on(&root1)
             .caption("Predicted vs. Actual Deletion Time", ("sans-serif", 50).into_font())
             .margin(5)
             .x_label_area_size(30)
             .y_label_area_size(40)
             .build_cartesian_2d(0.0..max_time, 0.0..max_time)
             .unwrap();
-
-        chart
+    
+        chart1
             .configure_mesh()
             .x_desc("Predicted Time (ms)")
             .y_desc("Actual Time (ms)")
             .draw()
             .unwrap();
-
-        chart
+    
+        chart1
             .draw_series(
                 predicted_times
                     .iter()
@@ -805,8 +814,8 @@ mod test_prediction {
                     .map(|(&x, &y)| Circle::new((x, y), 3, BLUE.filled())),
             )
             .unwrap();
-
-        chart
+    
+        chart1
             .draw_series(LineSeries::new(
                 (0..=max_time.ceil() as i32).map(|x| (x as f64, x as f64)),
                 &RED,
@@ -814,18 +823,20 @@ mod test_prediction {
             .unwrap()
             .label("Perfect Prediction (y=x)")
             .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], &RED));
-
-        chart
+    
+        chart1
             .configure_series_labels()
             .border_style(&BLACK)
             .background_style(&WHITE.mix(0.8))
             .draw()
             .unwrap();
-
-        root.present().expect("Unable to write result to file, please make sure 'plotters' feature is enabled.");
+    
+        root1
+            .present()
+            .expect("Unable to write result to file, please make sure 'plotters' feature is enabled.");
         println!("Scatter plot saved to prediction_vs_actual.png");
-
-        // --- Statistical Analysis ---
+    
+        // --- Statistical Analysis for Plot 1 ---
         let correlation_coefficient = pearson_correlation(&predicted_times, &actual_times)
             .unwrap_or(f64::NAN);
         println!("\n[Model Accuracy Test] --- Results ---");
@@ -841,6 +852,71 @@ mod test_prediction {
             "[Model Accuracy Test] Pearson Correlation Coefficient (Predicted vs Actual Time): {:.6}",
             correlation_coefficient
         );
+    
+        // --- Plot 2: Number of Files Removed vs. Actual Time, colored by concurrency level ---
+        // Group data by concurrency level.
+        use std::collections::BTreeMap;
+        let mut groups: BTreeMap<usize, Vec<(usize, f64)>> = BTreeMap::new();
+        for i in 0..NUMBER_OF_SCENARIOS {
+            groups
+                .entry(concurrency_levels[i])
+                .or_default()
+                .push((file_counts[i], actual_times[i]));
+        }
+    
+        // Determine x-axis maximum from file counts.
+        let max_files = file_counts.iter().cloned().max().unwrap_or(1000) as f64;
+        // We'll reuse max_actual for the y-axis maximum.
+    
+        let root2 = BitMapBackend::new("files_vs_actual.png", (1024, 768))
+            .into_drawing_area();
+        root2.fill(&WHITE).unwrap();
+    
+        let mut chart2 = ChartBuilder::on(&root2)
+            .caption("Number of Files Removed vs. Actual Time", ("sans-serif", 50).into_font())
+            .margin(5)
+            .x_label_area_size(40)
+            .y_label_area_size(40)
+            .build_cartesian_2d(0.0..max_files, 0.0..max_actual)
+            .unwrap();
+    
+        chart2
+            .configure_mesh()
+            .x_desc("Number of Files Removed")
+            .y_desc("Actual Time (ms)")
+            .draw()
+            .unwrap();
+    
+        // Define a palette of colors for different concurrency levels.
+        let palette = vec![
+            &BLUE, &RED, &GREEN, &CYAN, &MAGENTA, &YELLOW, &BLACK, &RGBColor(128, 0, 128),
+        ];
+    
+        // Plot each group using a distinct color.
+        for (i, (&concurrency, points)) in groups.iter().enumerate() {
+            let color = palette[i % palette.len()];
+            chart2
+                .draw_series(
+                    points.iter().map(|&(files, time)| {
+                        Circle::new((files as f64, time), 3, color.filled())
+                    }),
+                )
+                .unwrap()
+                .label(format!("Concurrency: {}", concurrency))
+                .legend(move |(x, y)| Circle::new((x, y), 3, color.filled()));
+        }
+    
+        chart2
+            .configure_series_labels()
+            .border_style(&BLACK)
+            .background_style(&WHITE.mix(0.8))
+            .draw()
+            .unwrap();
+    
+        root2
+            .present()
+            .expect("Unable to write result to file, please make sure 'plotters' feature is enabled.");
+        println!("Scatter plot saved to files_vs_actual.png");
     }
 }
 
