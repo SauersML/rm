@@ -674,6 +674,15 @@ mod test_prediction {
     use plotters::prelude::*;
     use statrs::statistics::Statistics;
 
+    // ===========================
+    // HARDCODED CONSTANTS (from empirical tests):
+    const T_CONVERSION_NS: f64 = 116.56;
+    const T_SYSCALL_NS: f64 = 113356.65;
+    const T_OVERHEAD_NS: f64 = 16538.87;
+    const F_DISK_A_FIT: f64 = 0.31238476;
+    const F_DISK_B_FIT: f64 = 1.20621366;
+    // ===========================
+
     const TEST_FILE_SIZE_KB: usize = 1;
     const NUM_TEST_FILES: usize = 100;
     const NUMBER_OF_SCENARIOS: usize = 500;
