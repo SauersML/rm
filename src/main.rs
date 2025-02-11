@@ -1003,8 +1003,7 @@ mod test_grid {
     #[test]
     fn test_grid_search() {
         let actual_cpus = num_cpus::get();
-        let num_simulated_cpus = actual_cpus;
-        let simulated_cpu_counts = generate_log_space(actual_cpus, num_simulated_cpus);
+        let simulated_cpu_counts = generate_log_space(actual_cpus, 32);
         let file_counts = [10, 100, 1000, 10000, 100000];
         let max_concurrency_multiplier = 8;
         println!("\n[Grid Search Test] Running...");
