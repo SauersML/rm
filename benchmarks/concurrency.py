@@ -70,20 +70,6 @@ def main():
 
     # =============================================================================
     # Plot 4: Linear model predicting TotalTime(ns) using our improved model.
-    #
-    # The model is defined in log-space as:
-    #   log(TotalTime(ns)) = β₀ + β₁*log(NumFiles) + β₂*log(Concurrency) + β₃*log(SimulatedCPUs)
-    #                       + β₄*[log(Concurrency)]² + β₅*[log(SimulatedCPUs)]²
-    #                       + β₆*(log(Concurrency)*log(SimulatedCPUs)) + ε
-    #
-    # We perform out-of-sample validation:
-    #   - Split the data into training and test sets.
-    #   - Fit the model on training data.
-    #   - Predict on the test set and compute Pearson's r and p-value between actual and
-    #     predicted TotalTime(ns) (after exponentiating back to the original scale).
-    # Also, we plot:
-    #   - A scatter plot of actual vs. predicted TotalTime(ns).
-    #   - A bar plot of standardized beta coefficients.
     # =============================================================================
     # Create new features in log-space
     df['log_NumFiles'] = np.log(df['NumFiles'])
