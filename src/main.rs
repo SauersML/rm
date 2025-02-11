@@ -103,13 +103,12 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
         num_cpus::get()
     );
 
-    // Set up progress bar
-    let pb = ProgressBar::new(total_files as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] {wide_bar} {pos}/{len} (ETA {eta})")
-            .progress_chars("=>-"),
-    );
+    // Set up progress bar using progression (updates throttled to 250 ms max)
+    let config = progression::Config {
+        throttle_millis: 250,
+        ..Default::default()
+    };
+    let pb = progression::Bar::new(total_files as u64, config);
 
     // Delete files with controlled concurrency
     let completed_counter = Arc::new(AtomicUsize::new(0));
@@ -130,21 +129,21 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
                     // after every deletion, we can update the progress bar less frequently.
                 match unlink_file(&path) {
                     Ok(_) => {
-                        let done = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                        pb.set_position(done as u64);
+                        completed_counter.fetch_add(1, Ordering::Relaxed);
+                        pb.inc(1);
                     }
                     Err(e) => {
                         eprintln!("Failed to delete '{}': {}", path.display(), e);
                         // Still count errors towards completion for accurate progress.
-                        let done = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                        pb.set_position(done as u64);
+                        completed_counter.fetch_add(1, Ordering::Relaxed);
+                        pb.inc(1);
                     }
                 }
             }
         })
         .await;
 
-    pb.finish_with_message("Deletion complete!");
+    pb.finish();
     Ok(())
 }
 
