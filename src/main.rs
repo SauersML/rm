@@ -601,8 +601,8 @@ mod empirical_tests {
         let b_fitted = best_params[1];
 
         println!("\n--- Fitted Parameters for f_disk(n) = 1 / (1 + a * n^b) ---");
-        println!("F_DISK_A_FIT = {:.8f}", a_fitted);  // Use in main.rs
-        println!("F_DISK_B_FIT = {:.8f}", b_fitted);  // Use in main.rs
+        println!("F_DISK_A_FIT = {:.8}", a_fitted);  // Use in main.rs
+        println!("F_DISK_B_FIT = {:.8}", b_fitted);  // Use in main.rs
 
         assert!(a_fitted > 0.0, "Fitted parameter 'a' should be positive");
         assert!(b_fitted > 0.0, "Fitted parameter 'b' should be positive");
