@@ -108,7 +108,7 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
         throttle_millis: 250,
         ..Default::default()
     };
-    let pb = progression::Bar::new(total_files as u64, config);
+    let pb = Arc::new(progression::Bar::new(total_files as u64, config));
 
     // Delete files with controlled concurrency
     let completed_counter = Arc::new(AtomicUsize::new(0));
@@ -116,7 +116,7 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
 
     file_stream
         .for_each_concurrent(Some(concurrency), |path| {
-            let pb = pb.clone();
+            let pb = Arc::clone(&pb);
             let completed_counter = completed_counter.clone();
             async move {
 
@@ -143,7 +143,7 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
         })
         .await;
 
-    pb.finish();
+    Arc::try_unwrap(pb).unwrap().finish();
     Ok(())
 }
 
