@@ -164,6 +164,15 @@ fn main() {
 
 
 
+
+
+
+
+
+// ====================================================================================================================================
+
+
+
 #[cfg(test)]
 mod performance_tests {
     use super::*;
@@ -966,6 +975,8 @@ mod test_grid {
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
     use rand::{Rng, thread_rng};
+    use plotters::prelude::*;
+    use plotters::style::colors::{BLACK, WHITE};
 
     const TEST_FILE_SIZE_KB: usize = 1;
 
@@ -975,24 +986,48 @@ mod test_grid {
         for i in 0..count {
             let file_path = dir.join(format!("test_file_{}.dat", i));
             let mut file = File::create(&file_path).unwrap();
-            // Write TEST_FILE_SIZE_KB kilobytes of zeros.
             file.write_all(&vec![0u8; TEST_FILE_SIZE_KB * 1024]).unwrap();
             paths.push(file_path);
         }
         paths
     }
 
+    /// Generates logarithmically spaced values between 1 and max_val, including max_val.
+    fn generate_log_space(max_val: usize, num_points: usize) -> Vec<usize> {
+        let max_val_f64 = max_val as f64;
+        let log_max = max_val_f64.log10();
+        let mut values = Vec::new();
+
+        if num_points > 1 {
+            for i in 0..(num_points - 1) {
+                let t = i as f64 / (num_points as f64 - 1.0);
+                let log_val = t * log_max;
+                let val = 10f64.powf(log_val).round() as usize;
+                values.push(val);
+            }
+        }
+
+        values.push(max_val); // Ensure max_val is included
+        values.dedup(); //Remove duplicates
+        values
+    }
+
     #[test]
     fn test_grid_search() {
-        let simulated_cpu_counts = [1, 2, 4, 8, 16, 32, num_cpus::get()];
-        let file_counts = [10, 100, 1000, 10000]; // Example file counts
-        let max_concurrency_multiplier = 4; // Test up to 4x simulated CPUs
+        let actual_cpus = num_cpus::get();
+        let num_simulated_cpus = actual_cpus.min(32); // Max 32 simulated CPU counts
+        let simulated_cpu_counts = generate_log_space(actual_cpus, num_simulated_cpus);
 
+        let file_counts = [10, 100, 1000, 10000, 100000]; // Example file counts
+        //let max_concurrency_multiplier = 4; // Removed
+        
         println!("\n[Grid Search Test] Running...");
 
+        // Data for 3D plot
+        let mut plot_data: Vec<(f64, f64, f64)> = Vec::new();
+
         for &simulated_cpus in &simulated_cpu_counts {
-            // Limit simulated_cpus to the actual number of CPUs.
-            let actual_cpus = num_cpus::get();
+            //Limit threads
             let num_threads = simulated_cpus.min(actual_cpus);
 
             // Create a new Tokio runtime for each simulated CPU count
@@ -1004,42 +1039,122 @@ mod test_grid {
 
             for &num_files in &file_counts {
                 let tmp_dir = tempdir().unwrap();
-                // Create files and get their paths
+                // Create files *before* the concurrency loop
                 let files = create_test_files(tmp_dir.path(), num_files);
 
-                // Create a string that will match all files in this directory
-                let pattern = format!("{}/*", tmp_dir.path().to_str().unwrap());
+                // Create pattern *before* the concurrency loop
+                let pattern = format!("{}/*", tmp_dir.path().to_string_lossy());
 
                 let mut min_time = Duration::MAX;
                 let mut optimal_concurrency = 1;
 
-                for concurrency in 1..=(max_concurrency_multiplier * simulated_cpus) { // Use simulated_cpus here
-                    // Limit the concurrency by the number of threads
-                    let actual_concurrency = concurrency.min(num_threads * max_concurrency_multiplier);
+                // Iterate up to the number of threads (simulated CPUs), not beyond.
+                for concurrency in 1..=num_threads {
                     let start = Instant::now();
-                    runtime.block_on(run_deletion(&pattern, Some(actual_concurrency))).unwrap(); // Pass CONCURRENCY and PATTERN
+                    runtime
+                        .block_on(run_deletion(&pattern, Some(concurrency))) // Use 'concurrency' directly
+                        .unwrap();
                     let elapsed = start.elapsed();
 
                     println!(
                         "  Simulated CPUs: {}, Files: {}, Concurrency: {}, Time: {:?}",
-                        simulated_cpus, num_files, actual_concurrency, elapsed
+                        simulated_cpus, num_files, concurrency, elapsed // Use 'concurrency'
                     );
 
                     if elapsed < min_time {
                         min_time = elapsed;
-                        optimal_concurrency = actual_concurrency; // Keep track of the actual concurrency used.
+                        optimal_concurrency = concurrency; // Use 'concurrency'
                     }
                 }
 
+                // Store data for plotting
+                plot_data.push((
+                    simulated_cpus as f64,
+                    optimal_concurrency as f64, // Use 'optimal_concurrency'
+                    num_files as f64,
+                ));
+
                 println!(
                     "[Grid Search Test] Optimal Concurrency (Simulated CPUs: {}, Files: {}): {}",
-                    simulated_cpus, num_files, optimal_concurrency
+                    simulated_cpus, num_files, optimal_concurrency // Use 'optimal_concurrency'
                 );
             }
         }
 
-        println!("[Grid Search Test] Complete.");
+        // Create the 3D plot
+        create_3d_plot(&plot_data).expect("Failed to create 3D plot");
+        println!("[Grid Search Test] Complete.  See optimal_concurrency.png");
+    }
+
+    /// Creates a 3D plot of the optimal concurrency data.
+    fn create_3d_plot(data: &[(f64, f64, f64)]) -> Result<(), Box<dyn std::error::Error>> {
+        let root = BitMapBackend::new("optimal_concurrency.png", (1024, 768)).into_drawing_area();
+        root.fill(&WHITE)?;
+
+        // Find maximum values for scaling the axes
+        let max_cpus = data.iter().map(|&(x, _, _)| x).fold(0.0, f64::max);
+        let max_concurrency = data.iter().map(|&(_, y, _)| y).fold(0.0, f64::max);
+        let max_files = data.iter().map(|&(_, _, z)| z).fold(0.0, f64::max);
+
+        let mut chart = ChartBuilder::on(&root)
+            .caption(
+                "Optimal Concurrency vs. CPUs and File Count",
+                ("sans-serif", 50).into_font(),
+            )
+            .margin(5)
+            .x_label_area_size(60)
+            .y_label_area_size(60)
+            .build_cartesian_3d(0.0..max_cpus, 0.0..max_concurrency, 0.0..max_files)?;
+
+        chart.configure_axes().draw()?;
+
+        // Manually draw axis labels (workaround for 3D charts in Plotters)
+        let label_style = ("sans-serif", 20).into_font(); // Increased font size
+        let x_mid = max_cpus / 2.0;
+        let y_mid = max_concurrency / 2.0;
+        let z_mid = max_files / 2.0;
+
+        // Draw X-axis label using draw_series and a single Text element
+        chart
+            .draw_series(std::iter::once(Text::new(
+                "Simulated CPUs",
+                (max_cpus + 5.0, 0.0, 0.0), // Adjusted position for visibility
+                label_style.clone(),
+            )))
+            .unwrap();
+
+        // Draw Y-axis label, rotating it for better visibility
+        chart
+            .draw_series(std::iter::once(Text::new(
+                "Optimal Concurrency",
+                (0.0, max_concurrency + 2.5, 0.0), // Adjusted position
+            )))
+            .unwrap();
+
+        // Draw Z-axis label, rotating it and adding an offset.
+        chart
+            .draw_series(std::iter::once(Text::new(
+                "Number of Files",
+                (0.0, -7.0, max_files + 1000.0), // Offset added on the Z axis.
+            )))
+            .unwrap();
+
+        chart
+            .draw_series(data.iter().map(|&(x, y, z)| {
+                let style = plotters::style::ShapeStyle {
+                    color: plotters::style::RGBColor(
+                        (255.0 * y / max_concurrency) as u8,
+                        0,
+                        (255.0 * (1.0 - y / max_concurrency)) as u8,
+                    )
+                    .into(),
+                    filled: true,
+                    stroke_width: 1,
+                };
+                Cross::new((x, y, z), 5, style)
+            }))
+            .unwrap();
+        Ok(())
     }
 }
-
 // cargo test --release -- --nocapture
