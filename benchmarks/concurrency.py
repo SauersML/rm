@@ -8,6 +8,7 @@ from scipy.stats import pearsonr
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import cross_val_score
 from sklearn.model_selection import train_test_split
+from matplotlib.colors import LinearSegmentedColormap
 
 def main():
     # =============================================================================
@@ -236,6 +237,52 @@ def main():
     p_val = model_ctrl.pvalues['log_Concurrency']
     print(f"Coefficient for log_Concurrency: {coef:.4f}")
     print(f"P-value for log_Concurrency: {p_val:.4f}")
+
+    # Load the data again
+    df = pd.read_csv('test_results.csv')
+    
+    # Log-transform the variables for the axes (add 1 to NumFiles in case of zeros)
+    df['log_SimulatedCPUs'] = np.log(df['SimulatedCPUs'])
+    df['log_Concurrency']    = np.log(df['Concurrency'])
+    df['log_NumFiles']       = np.log(df['NumFiles'] + 1)
+    
+    # Identify optimal points: for each (SimulatedCPUs, NumFiles) pair, select the row with minimum TotalTime(ns)
+    optimal_idx = df.groupby(['SimulatedCPUs', 'NumFiles'])['TotalTime(ns)'].idxmin()
+    optimal_mask = df.index.isin(optimal_idx)
+    non_optimal_mask = ~optimal_mask
+    
+    # Create a custom colormap for non-optimal points (gradient from orange-yellow to blue)
+    custom_cmap = LinearSegmentedColormap.from_list('custom_cmap', ['orange', 'yellow', 'blue'])
+    
+    # Normalize TotalTime(ns) for non-optimal points to [0, 1]
+    non_optimal_times = df.loc[non_optimal_mask, 'TotalTime(ns)']
+    norm = (non_optimal_times - non_optimal_times.min()) / (non_optimal_times.max() - non_optimal_times.min())
+    non_optimal_colors = custom_cmap(norm)
+    
+    # Create the 3D scatter plot using log-transformed values
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    
+    # Plot non-optimal points with gradient colors
+    ax.scatter(df.loc[non_optimal_mask, 'log_SimulatedCPUs'],
+               df.loc[non_optimal_mask, 'log_Concurrency'],
+               df.loc[non_optimal_mask, 'log_NumFiles'],
+               c=non_optimal_colors, marker='o', label='Non-Optimal')
+    
+    # Plot optimal points in red
+    ax.scatter(df.loc[optimal_mask, 'log_SimulatedCPUs'],
+               df.loc[optimal_mask, 'log_Concurrency'],
+               df.loc[optimal_mask, 'log_NumFiles'],
+               c='red', marker='o', label='Optimal (Lowest TotalTime)')
+    
+    ax.set_xlabel("log(SimulatedCPUs)")
+    ax.set_ylabel("log(Concurrency)")
+    ax.set_zlabel("log(NumFiles)")
+    ax.set_title("3D Scatter: Log-Transformed Axes with Optimal Points Highlighted")
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
 
 if __name__ == '__main__':
     main()
