@@ -191,30 +191,31 @@ mod performance_tests {
     use std::{
         fs::{self, File},
         io::Write,
-        path::PathBuf,
+        path::{Path, PathBuf},
         process::Command,
         time::Instant,
     };
     use tempfile::tempdir;
+    use tokio::runtime::Builder;
 
-    /// A helper to create multiple files in a given directory, each of a specified size (in kilobytes).
+    /// Creates a specified number of files in `dir`, each of size `size_kb` kilobytes.
     fn create_test_files(dir: &Path, count: usize, size_kb: usize) -> Vec<PathBuf> {
         let mut paths = Vec::with_capacity(count);
         for i in 0..count {
             let file_path = dir.join(format!("test_file_{}.dat", i));
             let mut f = File::create(&file_path).unwrap();
-            // Write `size_kb * 1024` bytes
+            // Write `size_kb * 1024` bytes of zeros.
             f.write_all(&vec![0u8; size_kb * 1024]).unwrap();
             paths.push(file_path);
         }
         paths
     }
 
-    /// Measures how long our Rust tool takes to delete files matching the pattern.
-    /// Returns the duration in seconds as an f64 for easy comparisons.
+    /// Runs our Rust deletion routine for files matching `pattern` and returns the elapsed time in seconds.
+    /// After deletion, we verify that no matching files remain.
     fn measure_rust_deletion(pattern: &str) -> f64 {
         let start = Instant::now();
-        // We create a fresh Tokio runtime to run `run_deletion`
+        // Create a fresh current-thread Tokio runtime to run `run_deletion`
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
         let result = rt.block_on(run_deletion(pattern, None));
         let elapsed = start.elapsed().as_secs_f64();
@@ -222,17 +223,24 @@ mod performance_tests {
         if let Err(e) = result {
             panic!("Error in Rust deletion: {}", e);
         }
+
+        // Verify that no matching files remain.
+        let remaining: Vec<_> = glob::glob(pattern).unwrap().filter_map(Result::ok).collect();
+        if !remaining.is_empty() {
+            panic!("Rust deletion failed: {} files remain", remaining.len());
+        }
+
         elapsed
     }
 
-    /// Measures how long the system `rm` command takes to delete the given pattern.
-    /// Returns the duration in seconds as an f64.
+    /// Runs the system `rm` command to delete files matching `pattern` and returns the elapsed time in seconds.
+    /// Uses the shell for glob expansion and verifies deletion afterward.
     fn measure_rm_deletion(pattern: &str) -> f64 {
         let start = Instant::now();
-        // We use `-f` to ignore nonexistent files (no prompt) and skip directories safely
-        let output = Command::new("rm")
-            .arg("-f")
-            .arg(pattern)
+        let cmd = format!("rm -f {}", pattern);
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
             .output()
             .expect("Failed to run `rm` command");
         let elapsed = start.elapsed().as_secs_f64();
@@ -240,10 +248,17 @@ mod performance_tests {
         if !output.status.success() {
             eprintln!("rm command stderr: {}", String::from_utf8_lossy(&output.stderr));
         }
+
+        // Verify that no matching files remain.
+        let remaining: Vec<_> = glob::glob(pattern).unwrap().filter_map(Result::ok).collect();
+        if !remaining.is_empty() {
+            panic!("rm deletion failed: {} files remain", remaining.len());
+        }
+
         elapsed
     }
 
-    /// Utility to format seconds in a human-friendly way for logging in tests.
+    /// Formats a duration in seconds to a human-friendly string (ms if < 1 second).
     fn format_duration(seconds: f64) -> String {
         if seconds < 1.0 {
             format!("{:.3} ms", seconds * 1000.0)
@@ -252,136 +267,110 @@ mod performance_tests {
         }
     }
 
-    #[test]
-    fn test_delete_small_number_of_small_files() {
-        let tmp = tempdir().unwrap();
-        let base_path = tmp.path().to_path_buf();
-        let file_count = 10;
-        let file_size_kb = 1;
-
-        // Create files
-        create_test_files(&base_path, file_count, file_size_kb);
-        let pattern = base_path.join("test_file_*.dat");
-        let pattern_str = pattern.to_string_lossy().to_string();
-
-        // Rust deletion time
-        let rust_time = measure_rust_deletion(&pattern_str);
-
-        // Recreate files for rm test
-        create_test_files(&base_path, file_count, file_size_kb);
-        let rm_time = measure_rm_deletion(&pattern_str);
-
-        println!(
-            "[test_delete_small_number_of_small_files] Rust: {}, rm: {}",
-            format_duration(rust_time),
-            format_duration(rm_time)
-        );
+    /// Structure to hold the benchmark results for one test scenario.
+    struct BenchmarkResult {
+        test_name: String,
+        file_count: usize,
+        file_size_kb: usize,
+        rust_time: f64,
+        rm_time: f64,
     }
 
-    #[test]
-    fn test_delete_large_number_of_small_files() {
+    /// Runs a benchmark scenario by creating files, measuring both Rust and `rm` deletion times, and returning the results.
+    fn run_benchmark(test_name: &str, file_count: usize, file_size_kb: usize) -> BenchmarkResult {
         let tmp = tempdir().unwrap();
         let base_path = tmp.path().to_path_buf();
-        let file_count = 50000;
-        let file_size_kb = 1; // Very small files, but many.
-
-        // Create files
-        create_test_files(&base_path, file_count, file_size_kb);
+        // The glob pattern used by both deletion methods.
         let pattern = base_path.join("test_file_*.dat");
         let pattern_str = pattern.to_string_lossy().to_string();
 
+        println!("\n--- {} ---", test_name);
         println!(
-            "Benchmark: Deleting {} small files ({}KB each)",
+            "Creating {} files ({} KB each)...",
             file_count, file_size_kb
         );
-
-        // Rust deletion time
-        let rust_time = measure_rust_deletion(&pattern_str);
-        println!("Rust Deletion Time: {}", format_duration(rust_time));
-
-        // Recreate for rm
+        // Create files for Rust deletion.
         create_test_files(&base_path, file_count, file_size_kb);
+
+        println!("Running Rust deletion...");
+        let rust_time = measure_rust_deletion(&pattern_str);
+        println!("Rust deletion completed in {}", format_duration(rust_time));
+
+        // Recreate files for the rm deletion test.
+        create_test_files(&base_path, file_count, file_size_kb);
+        println!("Running rm deletion...");
         let rm_time = measure_rm_deletion(&pattern_str);
-        println!("rm Command Deletion Time: {}", format_duration(rm_time));
+        println!("rm deletion completed in {}", format_duration(rm_time));
 
-        // Compare
-        if rust_time < rm_time {
-            println!(
-                "Our Rust code is faster than 'rm' by {}",
-                format_duration(rm_time - rust_time)
-            );
-        } else {
-            println!(
-                "'rm' is faster than our Rust code by {}",
-                format_duration(rust_time - rm_time)
-            );
-        }
-        println!("---");
-    }
-
-    #[test]
-    fn test_delete_small_number_of_large_files() {
-        let tmp = tempdir().unwrap();
-        let base_path = tmp.path().to_path_buf();
-        let file_count = 100;
-        let file_size_kb = 10240; // 10 MB each
-        println!(
-            "Benchmark: Deleting {} large files ({} KB each = ~{} MB total)",
+        BenchmarkResult {
+            test_name: test_name.to_string(),
             file_count,
             file_size_kb,
-            file_count * (file_size_kb / 1024)
-        );
-
-        // Create files
-        create_test_files(&base_path, file_count, file_size_kb);
-        let pattern = base_path.join("test_file_*.dat");
-        let pattern_str = pattern.to_string_lossy().to_string();
-
-        let rust_time = measure_rust_deletion(&pattern_str);
-        println!("Rust Deletion Time: {}", format_duration(rust_time));
-
-        // Recreate for rm
-        create_test_files(&base_path, file_count, file_size_kb);
-        let rm_time = measure_rm_deletion(&pattern_str);
-        println!("rm Command Deletion Time: {}", format_duration(rm_time));
-
-        if rust_time < rm_time {
-            println!(
-                "Our Rust code is faster than 'rm' by {}",
-                format_duration(rm_time - rust_time)
-            );
-        } else {
-            println!(
-                "'rm' is faster than our Rust code by {}",
-                format_duration(rust_time - rm_time)
-            );
+            rust_time,
+            rm_time,
         }
-        println!("---");
     }
 
+    /// The main performance benchmark test that runs several scenarios and prints a summary.
+    #[test]
+    fn performance_summary() {
+        println!("\n===== Starting Performance Benchmarks =====");
+
+        // Run benchmark scenarios.
+        let mut results = Vec::new();
+        results.push(run_benchmark("Small files (10 x 1 KB)", 10, 1));
+        results.push(run_benchmark("Many small files (50,000 x 1 KB)", 50_000, 1));
+        results.push(run_benchmark("Large files (100 x 10 MB)", 100, 10240));
+
+        // Print the final summary table.
+        println!("\n===== Performance Summary =====\n");
+        println!(
+            "{:<35} | {:>10} | {:>10} | {:>10} | {:>10}",
+            "Test Scenario", "Rust", "rm", "Diff", "Winner"
+        );
+        println!("{}", "-".repeat(85));
+
+        for res in results {
+            let diff = (res.rust_time - res.rm_time).abs();
+            let winner = if res.rust_time < res.rm_time { "Rust" } else { "rm" };
+            println!(
+                "{:<35} | {:>10} | {:>10} | {:>10} | {:>10}",
+                res.test_name,
+                format_duration(res.rust_time),
+                format_duration(res.rm_time),
+                format_duration(diff),
+                winner
+            );
+        }
+        println!("{}", "-".repeat(85));
+        println!("Note: Times are measured in seconds (or ms if < 1 second).");
+    }
+
+    /// Test to verify that attempting to delete a non-matching pattern does not error.
     #[test]
     fn test_delete_with_no_matches() {
-        // Confirm we gracefully handle a pattern with no files.
+        println!("\n--- Test: Deletion with No Matches ---");
         let tmp = tempdir().unwrap();
         let base_path = tmp.path().to_string_lossy().to_string();
         let pattern = format!("{}/no_such_file_*.dat", base_path);
 
-        // This shouldn't delete anything or error out.
+        // This should complete quickly since there are no files to delete.
         let rust_time = measure_rust_deletion(&pattern);
         println!(
-            "[test_delete_with_no_matches] Rust took {} (no files to delete).",
+            "Rust deletion with no matches completed in {}.",
             format_duration(rust_time)
         );
     }
 
+    /// Test to ensure that directories are not removed during deletion.
     #[test]
     fn test_skips_directories() {
-        // Confirm that directories are NOT removed.
+        println!("\n--- Test: Skipping Directories ---");
         let tmp = tempdir().unwrap();
         let dir_path = tmp.path().join("my_test_dir");
         fs::create_dir(&dir_path).unwrap();
 
-        // Also create a file that matches pattern
+        // Also create a file that matches the pattern.
         let file_path = tmp.path().join("my_test_dir_file.dat");
         File::create(&file_path).unwrap();
 
@@ -390,13 +379,12 @@ mod performance_tests {
 
         let rust_time = measure_rust_deletion(&pattern_str);
         println!(
-            "[test_skips_directories] Rust took {}.",
+            "Rust deletion (skipping directories) completed in {}.",
             format_duration(rust_time)
         );
 
-        // Directory should still exist
-        assert!(dir_path.is_dir());
-        // File should be deleted
+        // Verify that the directory still exists and the file has been deleted.
+        assert!(dir_path.is_dir(), "Directory was deleted!");
         assert!(!file_path.exists(), "File was not deleted!");
     }
 }
