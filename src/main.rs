@@ -641,10 +641,6 @@ mod empirical_tests {
             // Accept the new parameters.
             a = new_a;
             b = new_b;
-            println!(
-                "Iter {:>4}: cost = {:.12}, a = {:.8}, b = {:.8}, grad_norm = {:.12}, step = {:.8}",
-                iter, new_cost, a, b, grad_norm, step
-            );
     
             // Check for convergence based on cost improvement.
             if (current_cost - new_cost).abs() < tol {
