@@ -151,7 +151,7 @@ fn main() {
 
     let pattern = &args[1];
 
-    let result = runtime.block_on(run_deletion(pattern));
+    let result = runtime.block_on(run_deletion(pattern, None));
 
     match result {
         Ok(_) => println!("Files matching '{}' deleted successfully!", pattern),
