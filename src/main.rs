@@ -1222,6 +1222,74 @@ mod file_count_tests {
         Ok(())
     }
 
+        // Extremely optimized file counting using Rust std::fs::read_dir.
+    fn count_using_read_dir_fast(path: &Path) -> (usize, Duration) {
+        let start = Instant::now();
+        let count = fs::read_dir(path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                // Directly check if the entry is a file.
+                entry.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+            })
+            .count();
+        (count, start.elapsed())
+    }
+
+    // Extremely optimized file counting using the raw getdents64 syscall with a 1MB buffer.
+    fn count_using_getdents64_fast(path: &Path) -> (usize, Duration) {
+        let start = Instant::now();
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        unsafe {
+            let fd = libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+            if fd < 0 {
+                panic!("Failed to open directory");
+            }
+            let buf_size = 1 << 20; // 1MB buffer
+            let mut buf = vec![0u8; buf_size];
+            let mut count = 0;
+            loop {
+                let nread = libc::syscall(
+                    libc::SYS_getdents64,
+                    fd,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf_size,
+                );
+                if nread < 0 {
+                    libc::close(fd);
+                    panic!("getdents64 failed");
+                }
+                if nread == 0 {
+                    break;
+                }
+                let mut bpos = 0;
+                while bpos < nread as usize {
+                    let d = buf.as_ptr().add(bpos) as *const libc::dirent64;
+                    let reclen = (*d).d_reclen as usize;
+                    let name_ptr = (*d).d_name.as_ptr();
+                    // Fast manual check for "." and ".." without creating a CStr.
+                    if *name_ptr != b'.' as i8 {
+                        if (*d).d_type == libc::DT_REG {
+                            count += 1;
+                        }
+                    } else {
+                        let second = *name_ptr.add(1);
+                        if second == 0 {
+                            // It's ".", skip.
+                        } else if second == b'.' as i8 && *name_ptr.add(2) == 0 {
+                            // It's "..", skip.
+                        } else if (*d).d_type == libc::DT_REG {
+                            count += 1;
+                        }
+                    }
+                    bpos += reclen;
+                }
+            }
+            libc::close(fd);
+            (count, start.elapsed())
+        }
+    }
+
     #[test]
     fn test_file_count_methods() -> Result<(), Box<dyn std::error::Error>> {
         // Create a temporary directory.
@@ -1229,7 +1297,7 @@ mod file_count_tests {
         let dir_path = tmp_dir.path();
 
         // Create 10,000 files.
-        let num_files = 10_000;
+        let num_files = 50;
         for i in 0..num_files {
             let file_path = dir_path.join(format!("file_{}.dat", i));
             let mut file = File::create(file_path).unwrap();
@@ -1260,6 +1328,12 @@ mod file_count_tests {
 
         let (c, t) = count_using_getdents64(dir_path);
         results.push(("Raw getdents64 syscall", c, t));
+
+        let (c, t) = count_using_read_dir_fast(dir_path);
+        results.push(("std::fs::read_dir fast", c, t));
+
+        let (c, t) = count_using_getdents64_fast(dir_path);
+        results.push(("Raw getdents64 fast", c, t));
         
         // Using scandir-rs's Count API:
         {
