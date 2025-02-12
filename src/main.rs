@@ -1668,4 +1668,206 @@ mod glob_tests {
 }
 
 
+// cargo test --release -- --nocapture collect_tests
+#[cfg(test)]
+mod collect_tests {
+    use super::*; // Import everything from the parent module, including collect_matching_files_fast.
+    use globset::{Glob, GlobSetBuilder};
+    use std::{
+        fs,
+        io,
+        os::unix::fs::symlink,
+        path::{Path, PathBuf},
+    };
+    use tempfile::TempDir;
+
+    /// Helper function: Build a globset matcher from a given pattern.
+    fn build_matcher(pattern: &str) -> globset::GlobSet {
+        let mut gs_builder = GlobSetBuilder::new();
+        // Note: Glob::new returns a Result; unwrap here with expect.
+        gs_builder.add(Glob::new(pattern).expect("Failed to create glob"));
+        gs_builder.build().expect("Failed to build globset")
+    }
+
+    /// Test that files matching a simple pattern are correctly collected.
+    #[test]
+    fn test_collect_basic_matching() -> io::Result<()> {
+        // Create a fresh temporary directory.
+        let temp_dir = TempDir::new()?;
+        let dir = temp_dir.path();
+
+        // Create some files.
+        // Files that should match "testmatch*.txt"
+        let matching_files = ["testmatch1.txt", "testmatch_extra.txt"];
+        // Files that should not match.
+        let non_matching_files = ["nomatch1.txt", "other.dat"];
+
+        for fname in matching_files.iter().chain(non_matching_files.iter()) {
+            fs::write(dir.join(fname), b"dummy")?;
+        }
+
+        // Build a matcher for "testmatch*.txt".
+        let matcher = build_matcher("testmatch*.txt");
+
+        // Call the function under test.
+        let mut collected = collect_matching_files_fast(dir, &matcher)?;
+        collected.sort();
+
+        // Build expected full paths.
+        let mut expected: Vec<PathBuf> = matching_files.iter().map(|s| dir.join(s)).collect();
+        expected.sort();
+
+        assert_eq!(
+            collected, expected,
+            "Collected files do not match expected files"
+        );
+        Ok(())
+    }
+
+    /// Test that an empty directory yields an empty vector.
+    #[test]
+    fn test_collect_empty_directory() -> io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let dir = temp_dir.path();
+
+        let matcher = build_matcher("*.txt");
+        let files = collect_matching_files_fast(dir, &matcher)?;
+        assert!(files.is_empty(), "Expected no files in an empty directory");
+        Ok(())
+    }
+
+    /// Test that when no file matches the given pattern, an empty vector is returned.
+    #[test]
+    fn test_collect_non_matching_pattern() -> io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let dir = temp_dir.path();
+
+        // Create files that do not match "*.txt"
+        for fname in &["file1.dat", "image.png"] {
+            fs::write(dir.join(fname), b"dummy")?;
+        }
+        let matcher = build_matcher("*.txt");
+        let files = collect_matching_files_fast(dir, &matcher)?;
+        assert!(files.is_empty(), "Expected no matches for pattern '*.txt'");
+        Ok(())
+    }
+
+    /// Test that the function does not collect "." or ".." entries.
+    #[test]
+    fn test_dot_entries_not_collected() -> io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let dir = temp_dir.path();
+
+        // Create a couple of normal files.
+        fs::write(dir.join("file.txt"), b"dummy")?;
+        fs::write(dir.join(".hidden.txt"), b"dummy")?;
+
+        let matcher = build_matcher("*.txt");
+        let mut collected = collect_matching_files_fast(dir, &matcher)?;
+        collected.sort();
+
+        let mut expected: Vec<PathBuf> =
+            vec![dir.join("file.txt"), dir.join(".hidden.txt")];
+        expected.sort();
+
+        assert_eq!(
+            collected, expected,
+            "Dot entries were incorrectly included or excluded"
+        );
+        Ok(())
+    }
+
+    /// Test that only regular files are collected (directories and symlinks are skipped).
+    #[test]
+    fn test_file_type_filtering() -> io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let dir = temp_dir.path();
+
+        // Create a regular file.
+        fs::write(dir.join("regular.txt"), b"dummy")?;
+        // Create a subdirectory.
+        fs::create_dir(dir.join("subdir"))?;
+        // Create a symlink (assumes Unix).
+        let target = dir.join("regular.txt");
+        let symlink_path = dir.join("link.txt");
+        symlink(&target, &symlink_path)?;
+
+        let matcher = build_matcher("*.txt");
+        let files = collect_matching_files_fast(dir, &matcher)?;
+        // Only "regular.txt" should be collected.
+        assert_eq!(
+            files.len(),
+            1,
+            "Expected only one regular file to be collected (directories and symlinks should be skipped)"
+        );
+        assert_eq!(files[0], target, "Collected file is not the expected regular file");
+        Ok(())
+    }
+
+    /// Test error handling when a nonexistent directory is passed.
+    #[test]
+    fn test_nonexistent_directory() {
+        let fake_dir = Path::new("/this/dir/should/not/exist");
+        let matcher = build_matcher("*.txt");
+        let result = collect_matching_files_fast(fake_dir, &matcher);
+        assert!(result.is_err(), "Expected an error for a nonexistent directory");
+    }
+
+    /// Test error handling when directory permission is denied.
+    #[cfg(unix)]
+    #[test]
+    fn test_permission_denied() -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = TempDir::new()?;
+        let dir = temp_dir.path();
+
+        // Create a file so the directory is not empty.
+        fs::write(dir.join("file.txt"), b"dummy")?;
+        // Get current permissions.
+        let metadata = fs::metadata(dir)?;
+        let mut perms = metadata.permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(dir, perms.clone())?;
+
+        let matcher = build_matcher("*.txt");
+        let result = collect_matching_files_fast(dir, &matcher);
+        // Restore permissions so TempDir can be cleaned up.
+        perms.set_mode(0o755);
+        fs::set_permissions(dir, perms)?;
+        assert!(result.is_err(), "Expected a permission denied error");
+        Ok(())
+    }
+
+    /// (Optional) Performance test.
+    /// Creates many files and prints the elapsed time for collecting matching files.
+    #[test]
+    fn test_performance_large_directory() -> io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let dir = temp_dir.path();
+        let num_files = 100_000; // Adjust as needed.
+        // Create 100_000 files; half match "testmatch*.txt".
+        for i in 0..num_files {
+            let fname = if i % 2 == 0 {
+                format!("testmatch{:06}.txt", i)
+            } else {
+                format!("nomatch{:06}.dat", i)
+            };
+            fs::write(dir.join(&fname), b"dummy")?;
+        }
+        let matcher = build_matcher("testmatch*.txt");
+
+        let start = std::time::Instant::now();
+        let files = collect_matching_files_fast(dir, &matcher)?;
+        let elapsed = start.elapsed();
+        println!(
+            "Performance test: Collected {} matching files out of {} in {:?}",
+            files.len(),
+            num_files,
+            elapsed
+        );
+        // For 100_000 files (around 50_000 matches), expect a very short runtime.
+        Ok(())
+    }
+}
+
 // cargo test --release -- --nocapture
