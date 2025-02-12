@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use futures::{stream, StreamExt};
+use futures::{StreamExt};
 use num_cpus;
 use tokio::runtime::Builder;
 use lazy_static::lazy_static;
