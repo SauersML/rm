@@ -1214,8 +1214,9 @@ mod file_count_tests {
         let entries = Scandir::new(dir_path, None)?.collect()?;
         // Filter only entries that are files (in case directories are also returned).
         let file_count = entries.results.iter().filter(|entry| match entry {
-            scandir::ScandirResult::DirEntry(ref de) => de.is_file,
-            scandir::ScandirResult::DirEntryExt(ref de) => de.is_file,
+            &scandir::ScandirResult::DirEntry(ref de) => de.is_file,
+            &scandir::ScandirResult::DirEntryExt(ref de) => de.is_file,
+            &scandir::ScandirResult::Error(_) => false,
         }).count();
         assert_eq!(file_count, num_files, "Scandir API did not return the expected number of file entries");
         Ok(())
@@ -1282,8 +1283,9 @@ mod file_count_tests {
             let start = Instant::now();
             let entries = Scandir::new(dir_path, None)?.collect()?;
             let count = entries.results.iter().filter(|entry| match entry {
-                scandir::ScandirResult::DirEntry(ref de) => de.is_file,
-                scandir::ScandirResult::DirEntryExt(ref de) => de.is_file,
+                &scandir::ScandirResult::DirEntry(ref de) => de.is_file,
+                &scandir::ScandirResult::DirEntryExt(ref de) => de.is_file,
+                &scandir::ScandirResult::Error(_) => false,
             }).count();
             let duration = start.elapsed();
             results.push(("scandir Scandir API", count, duration));
