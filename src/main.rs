@@ -12,9 +12,12 @@ use std::{
 use futures::{stream, StreamExt};
 use num_cpus;
 use tokio::runtime::Builder;
-use std::os::unix::ffi::OsStrExt;
 use lazy_static::lazy_static;
 use progression::{Bar, Config};
+use std::ffi::{OsStr};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{PathBuf};
+use globset::GlobSet;
 
 /// Delete a single file via a direct `unlink` (libc) call.
 /// The `for_each_concurrent` function, combined with the `async` block,
@@ -202,11 +205,76 @@ fn main() {
 }
 
 
-
-
-
-
-
+/// Collects all matching file paths in the given directory using a fast,
+/// getdents64-based approach. Only regular files (and not "." or "..")
+/// are considered, and each file’s name is filtered using the provided globset matcher.
+///
+/// # Inputs
+/// - `dir`: A canonicalized directory (absolute path) in which to search.
+/// - `matcher`: A reference to a GlobSet matcher built from the desired filename pattern.
+///
+/// # Output
+/// Returns an io::Result containing a Vec<PathBuf> with the full paths of all files
+/// that match the globset.
+fn collect_matching_files_fast(dir: &Path, matcher: &GlobSet) -> io::Result<Vec<PathBuf>> {
+    // Open the directory using the raw syscall interface.
+    let c_path = CString::new(dir.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Directory path contains null byte"))?;
+    unsafe {
+        let fd = libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Allocate a large buffer to minimize syscall overhead.
+        let buf_size = 1 << 26; // 64 MB
+        let mut buf = vec![0u8; buf_size];
+        let mut files = Vec::new();
+        loop {
+            let nread = libc::syscall(
+                libc::SYS_getdents64,
+                fd,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf_size,
+            );
+            if nread < 0 {
+                libc::close(fd);
+                return Err(io::Error::last_os_error());
+            }
+            if nread == 0 {
+                break;
+            }
+            let mut bpos = 0;
+            while bpos < nread as usize {
+                let d = buf.as_ptr().add(bpos) as *const libc::dirent64;
+                let reclen = (*d).d_reclen as usize;
+                let name_ptr = (*d).d_name.as_ptr();
+                // Determine the length of the filename (until null terminator).
+                let mut namelen = 0;
+                while *name_ptr.add(namelen) != 0 {
+                    namelen += 1;
+                }
+                // Skip entries for "." and ".."
+                if namelen > 0 {
+                    let name_slice = std::slice::from_raw_parts(name_ptr as *const u8, namelen);
+                    if name_slice == b"." || name_slice == b".." {
+                        // Skip "." and ".."
+                    } else if (*d).d_type == libc::DT_REG {
+                        // Convert raw bytes to OsStr.
+                        let os_str = OsStr::from_bytes(name_slice);
+                        // Use globset matcher to check if the filename matches.
+                        if matcher.is_match(os_str) {
+                            // Construct full path by joining the directory and the file name.
+                            files.push(dir.join(os_str));
+                        }
+                    }
+                }
+                bpos += reclen;
+            }
+        }
+        libc::close(fd);
+        Ok(files)
+    }
+}
 
 // ====================================================================================================================================
 
