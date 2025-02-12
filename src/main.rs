@@ -974,6 +974,7 @@ mod file_count_tests {
     use std::ffi::{CStr, CString};
     use std::fs::{self, File};
     use std::io::Write;
+    use std::os::unix::ffi::OsStrExt; // For as_bytes() on OsStr.
     use std::path::Path;
     use std::time::{Duration, Instant};
 
@@ -981,6 +982,16 @@ mod file_count_tests {
     use walkdir::WalkDir;
     use rayon::prelude::*;
     use libc;
+
+    // Declare an external binding for scandir from the C library.
+    extern "C" {
+        pub fn scandir(
+            dir: *const libc::c_char,
+            namelist: *mut *mut *mut libc::dirent,
+            filter: Option<unsafe extern "C" fn(*const libc::dirent) -> libc::c_int>,
+            compar: Option<unsafe extern "C" fn(*const *const libc::dirent, *const *const libc::dirent) -> libc::c_int>,
+        ) -> libc::c_int;
+    }
 
     // This helper is used by the scandir-based method.
     // It returns 1 if the entry is a regular file and not "." or "..".
@@ -1020,10 +1031,7 @@ mod file_count_tests {
             .unwrap()
             .filter_map(Result::ok)
             .filter(|entry| {
-                entry
-                    .file_type()
-                    .map(|ft| ft.is_file())
-                    .unwrap_or(false)
+                entry.file_type().map(|ft| ft.is_file()).unwrap_or(false)
             })
             .count();
         (count, start.elapsed())
@@ -1049,10 +1057,7 @@ mod file_count_tests {
             .par_bridge()
             .filter_map(Result::ok)
             .filter(|entry| {
-                entry
-                    .file_type()
-                    .map(|ft| ft.is_file())
-                    .unwrap_or(false)
+                entry.file_type().map(|ft| ft.is_file()).unwrap_or(false)
             })
             .count();
         (count, start.elapsed())
@@ -1090,13 +1095,13 @@ mod file_count_tests {
         }
     }
 
-    // Uses libc's scandir() function.
+    // Uses the C library's scandir() function.
     fn count_using_scandir(path: &Path) -> (usize, Duration) {
         let start = Instant::now();
         let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
         unsafe {
             let mut namelist: *mut *mut libc::dirent = std::ptr::null_mut();
-            let count = libc::scandir(c_path.as_ptr(), &mut namelist, Some(file_filter), None);
+            let count = scandir(c_path.as_ptr(), &mut namelist, Some(file_filter), None);
             if count < 0 {
                 panic!("scandir failed");
             }
