@@ -52,14 +52,14 @@ fn compute_optimal_concurrency(num_files: usize) -> usize {
 
 /// Main async entry point
 async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io::Result<()> {
-    // Split the provided pattern into a directory part and a filename pattern.
+    // Split the provided pattern into a directory part and a filename pattern
     let (dir_path, file_pattern) = pattern.rsplit_once('/').unwrap_or((".", pattern));
     let dir = Path::new(dir_path);
+    
     // Canonicalize the directory to get its absolute path for safety
     let canonical_dir = std::fs::canonicalize(dir)?;
-
+    
     // Build a globset matcher for the filename pattern
-    // Convert any globset errors into io::Error
     let mut gs_builder = globset::GlobSetBuilder::new();
     gs_builder.add(
         globset::Glob::new(file_pattern)
@@ -67,24 +67,22 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
     );
     let glob_set = gs_builder.build()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e)))?;
-
-    // First pass: count the files that match the pattern
+    
+    // Initial counting pass to determine the total number of matching files
     let mut total_files = 0;
     for entry in std::fs::read_dir(&canonical_dir)? {
         let entry = entry?;
-        if let Some(fname) = entry.path().file_name() {
-            if glob_set.is_match(fname) {
-                if entry.file_type()?.is_file() {
-                    total_files += 1;
-                }
-            }
+        let fname = entry.file_name();
+        let fname_str = fname.to_string_lossy();
+        if glob_set.is_match(&*fname_str) && entry.file_type()?.is_file() {
+            total_files += 1;
         }
     }
     if total_files == 0 {
-        println!("No matching files found for pattern '{}'.", pattern);
+        println!("No matching files found for pattern '{}'", pattern);
         return Ok(());
     }
-
+    
     // Compute the concurrency level using the total file count and any override
     let concurrency = match concurrency_override {
         Some(n) => n,
@@ -96,73 +94,83 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
         concurrency,
         num_cpus::get()
     );
-
-    // Set up the progress bar with throttling.
+    
+    // Set up shared state for deletion
+    let completed_counter = Arc::new(AtomicUsize::new(0));
+    const BATCH_SIZE: usize = 1000;
+    
+    // Initialize progress bar with the correct total count
     let config = Config {
         throttle_millis: 250,
         ..Default::default()
     };
     let pb = Arc::new(Bar::new(total_files as u64, config));
-    let completed_counter = Arc::new(AtomicUsize::new(0));
-    const BATCH_SIZE: usize = 1000;
-
-    // Second pass: stream through the directory entries for deletion.
-    // We stream the entries from the canonicalized directory.
+    
+    // Clone shared state for use in the concurrent closure without moving the originals
+    let pb_clone = Arc::clone(&pb);
+    let completed_counter_clone = Arc::clone(&completed_counter);
+    let canonical_dir_clone = canonical_dir.clone();
+    let glob_set_clone = glob_set.clone();
+    
+    // Stream directory entries and delete matching files (second pass)
     let dir_entries = std::fs::read_dir(&canonical_dir)?;
     let file_stream = stream::iter(dir_entries.filter_map(Result::ok));
-
-    file_stream.for_each_concurrent(Some(concurrency), |entry| {
-        let pb = Arc::clone(&pb);
-        let completed_counter = Arc::clone(&completed_counter);
-        // Clone the globset matcher (which is cheap) for use within this async block
-        let glob_set = glob_set.clone();
+    
+    file_stream.for_each_concurrent(Some(concurrency), move |entry| {
+        // Clone shared state within each concurrent task from the clones above
+        let pb = Arc::clone(&pb_clone);
+        let completed_counter = Arc::clone(&completed_counter_clone);
+        let canonical_dir = canonical_dir_clone.clone();
+        let glob_set = glob_set_clone.clone();
         async move {
-            let path = entry.path();
-            if let Some(fname) = path.file_name() {
-                // Check the filename against the globset
-                if glob_set.is_match(fname) {
-                    // Make sure the entry is a file
-                    match entry.file_type() {
-                        Ok(ft) if ft.is_file() => {
-                            // Attempt to delete the file
-                            match unlink_file(&path) {
-                                Ok(_) => {
-                                    // Atomically increment the counter
-                                    let count = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                                    // Update the progress bar in batches.
-                                    if count % BATCH_SIZE == 0 {
-                                        pb.inc(BATCH_SIZE as u64);
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("Failed to delete '{}': {}", path.display(), e);
-                                    std::process::exit(1); // Fail fast on error.
+            let fname = entry.file_name();
+            let fname_str = fname.to_string_lossy();
+            // Match using the globset matcher; dereference the Cow to &str
+            if glob_set.is_match(&*fname_str) {
+                match entry.file_type() {
+                    Ok(ft) if ft.is_file() => {
+                        // Construct the full path only when needed
+                        let path = canonical_dir.join(&fname);
+                        // Attempt to delete the file
+                        match unlink_file(&path) {
+                            Ok(_) => {
+                                let completed_count = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                                // Update progress bar in batches
+                                if completed_count % BATCH_SIZE == 0 {
+                                    pb.inc(BATCH_SIZE as u64);
                                 }
                             }
+                            Err(e) => {
+                                eprintln!("Failed to delete '{}': {}", path.display(), e);
+                                std::process::exit(1);
+                            }
                         }
-                        Ok(_) => { /* Not a file; skip it. */ }
-                        Err(e) => {
-                            eprintln!("Failed to get file type for '{}': {}", path.display(), e);
-                            std::process::exit(1);
-                        }
+                    }
+                    Ok(_) => { /* Not a file; skip it */ }
+                    Err(e) => {
+                        eprintln!("Failed to get file type for '{}': {}", entry.path().display(), e);
+                        std::process::exit(1);
                     }
                 }
             }
         }
     }).await;
-
-    // Finalize the progress bar for any remaining files in the last incomplete batch
+    
+    // Finalize the progress bar for any remaining files in the last batch
     let remainder = completed_counter.load(Ordering::Relaxed) % BATCH_SIZE;
     if remainder > 0 {
         pb.inc(remainder as u64);
     }
+    
+    // Use try_unwrap to finish the progress bar; if unsuccessful, drop the Arc
     match Arc::try_unwrap(pb) {
         Ok(bar_inner) => { bar_inner.finish(); },
         Err(_) => {},
     }
-
+    
     Ok(())
 }
+
 
 
 
