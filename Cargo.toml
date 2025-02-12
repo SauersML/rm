@@ -25,3 +25,7 @@ argmin = "0.10.0"
 statrs = "0.18.0"
 lazy_static = "1.5.0"
 argmin-math   = { version = "0.4.0", features = ["ndarray_latest"] }
+
+[dev-dependencies]
+rayon = "1.10.0"
+walkdir = "2.5.0"
