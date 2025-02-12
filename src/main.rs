@@ -968,7 +968,7 @@ mod test_grid {
 
 
 
-// cargo test --release -- --nocapture test_grid
+// cargo test --release -- --nocapture file_count_tests
 #[cfg(test)]
 mod file_count_tests {
     use std::ffi::{CStr, CString};
