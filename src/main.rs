@@ -1838,7 +1838,6 @@ mod collect_tests {
         Ok(())
     }
 
-    /// (Optional) Performance test.
     /// Creates many files and prints the elapsed time for collecting matching files.
     #[test]
     fn test_performance_large_directory() -> io::Result<()> {
