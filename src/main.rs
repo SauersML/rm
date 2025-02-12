@@ -213,6 +213,7 @@ mod performance_tests {
         path::{Path, PathBuf},
         process::Command,
         time::Instant,
+        glob::glob,
     };
     use tempfile::tempdir;
     use tokio::runtime::Builder;
