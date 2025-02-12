@@ -1422,7 +1422,7 @@ mod glob_tests {
 
     #[test]
     fn performance_comparison() -> io::Result<()> {
-        // Create a temporary directory.  Use a RAII guard
+        // Create a temporary directory.
         let temp_dir = tempfile::Builder::new()
             .prefix(TEMP_DIR_PREFIX)
             .tempdir()?;
@@ -1441,7 +1441,7 @@ mod glob_tests {
         }
         let duration_glob = measure_duration(start_glob, "glob crate");
 
-        // --- globset crate test ---
+        // --- globset crate test (matching only file names) ---
         let start_globset = Instant::now();
         let mut globset_count = 0;
         let mut builder = GlobSetBuilder::new();
@@ -1452,29 +1452,34 @@ mod glob_tests {
 
         for entry in fs::read_dir(dir_path)? {
             let entry = entry?;
+            // Using only the file name here.
             if set.is_match(entry.file_name()) {
                 globset_count += 1;
             }
         }
         let duration_globset = measure_duration(start_globset, "globset crate");
 
-        // --- globset crate test (with Path) ---
+        // --- globset crate test (with full Path) ---
         let start_globset_path = Instant::now();
         let mut globset_path_count = 0;
         let mut builder_path = GlobSetBuilder::new();
-        let compiled_glob_path = Glob::new(MATCH_PATTERN)
+        // Build a pattern that includes the directory.
+        let full_pattern = format!("{}/{}", dir_path.to_string_lossy(), MATCH_PATTERN);
+        let compiled_glob_path = Glob::new(&full_pattern)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         builder_path.add(compiled_glob_path);
         let set_path = builder_path.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
+        // Now check each entry's full path.
         for entry in fs::read_dir(dir_path)? {
             let entry = entry?;
-            if set_path.is_match(&dir_path.join(entry.file_name())) {
+            if set_path.is_match(&entry.path()) {
                 globset_path_count += 1;
             }
         }
         let duration_globset_path = measure_duration(start_globset_path, "globset crate (with Path)");
 
+        // Assertions.
         assert_eq!(
             glob_count,
             NUM_FILES / 2,
@@ -1544,7 +1549,7 @@ mod glob_tests {
         }
         let duration_glob = measure_duration(start_glob, "glob crate (case-insensitive)");
 
-        // --- globset crate test (case-insensitive) ---
+        // --- globset crate test (case-insensitive, matching file names) ---
         let start_globset = Instant::now();
         let mut globset_count = 0;
         let mut builder = GlobSetBuilder::new();
@@ -1563,11 +1568,12 @@ mod glob_tests {
         }
         let duration_globset = measure_duration(start_globset, "globset crate (case-insensitive)");
 
-        // --- globset crate test (case-insensitive with Path) ---
+        // --- globset crate test (case-insensitive with full Path) ---
         let start_globset_path = Instant::now();
         let mut globset_path_count = 0;
         let mut builder_path = GlobSetBuilder::new();
-        let compiled_glob_path = GlobBuilder::new(MATCH_PATTERN)
+        let full_pattern = format!("{}/{}", dir_path.to_string_lossy(), MATCH_PATTERN);
+        let compiled_glob_path = GlobBuilder::new(&full_pattern)
             .case_insensitive(true)
             .build()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
@@ -1575,7 +1581,7 @@ mod glob_tests {
         let set_path = builder_path.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         for entry in fs::read_dir(dir_path)? {
             let entry = entry?;
-            if set_path.is_match(&dir_path.join(entry.file_name())) {
+            if set_path.is_match(&entry.path()) {
                 globset_path_count += 1;
             }
         }
@@ -1584,6 +1590,7 @@ mod glob_tests {
             "globset crate (case-insensitive with Path)",
         );
 
+        // Assertions.
         assert_eq!(
             glob_count,
             NUM_FILES / 2,
@@ -1619,5 +1626,6 @@ mod glob_tests {
         Ok(())
     }
 }
+
 
 // cargo test --release -- --nocapture
