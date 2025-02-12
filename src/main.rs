@@ -1159,33 +1159,6 @@ mod file_count_tests {
         }
     }
 
-    // Uses statistical estimation based on directory metadata.
-    // Because directory metadata size may not scale exactly with entry count,
-    // we allow a 50% error margin.
-    fn count_using_statistical_estimation(path: &Path) -> (usize, Duration) {
-        let start = Instant::now();
-        // Do a quick full scan to compute an average file-name length.
-        let entries: Vec<_> = fs::read_dir(path).unwrap().filter_map(Result::ok).collect();
-        let precise_count = entries.len();
-        let total_name_length: usize = entries
-            .iter()
-            .map(|entry| entry.file_name().to_string_lossy().len())
-            .sum();
-        let average_entry_size = if precise_count > 0 {
-            total_name_length as f64 / precise_count as f64
-        } else {
-            0.0
-        };
-        let dir_meta = fs::metadata(path).unwrap();
-        let dir_size = dir_meta.len() as f64;
-        let estimated_count = if average_entry_size > 0.0 {
-            (dir_size / average_entry_size).round() as usize
-        } else {
-            0
-        };
-        (estimated_count, start.elapsed())
-    }
-
     #[test]
     fn test_file_count_methods() {
         // Create a temporary directory.
@@ -1225,8 +1198,6 @@ mod file_count_tests {
         let (c, t) = count_using_getdents64(dir_path);
         results.push(("Raw getdents64 syscall", c, t));
 
-        let (c, t) = count_using_statistical_estimation(dir_path);
-        results.push(("Statistical estimation", c, t));
 
         println!("File counting results (expected count: {}):", num_files);
         for (desc, count, duration) in results {
