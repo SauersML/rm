@@ -398,9 +398,10 @@ mod performance_tests {
         results.push(run_benchmark("One file (1 x 10 KB)", 10, 10, false, false));
         results.push(run_benchmark("Small files (10 x 1 KB)", 10, 1, false, false));
         results.push(run_benchmark("Some small files (20000 x 1 KB)", 20000, 1, false, false));
+        results.push(run_benchmark("Many small files (100,000 x 1 KB)", 100_000, 1, false, false));
         results.push(run_benchmark(
-            "Many small files (300,000 x 1 KB)",
-            300_000,
+            "A ton of small files (500,000 x 1 KB)",
+            500_000,
             1,
             true,
             true,
