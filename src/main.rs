@@ -1173,8 +1173,8 @@ mod file_count_tests {
         }
 
         // Create a Count instance and collect the file statistics.
-        let count = Count::new(dir_path)?.collect()?;
-        assert_eq!(count, num_files, "Count API did not report the expected number of files");
+        let stats = Count::new(dir_path)?.collect()?;
+        assert_eq!(stats.files, num_files, "Count API did not report the expected number of files");
         Ok(())
     }
 
@@ -1191,10 +1191,10 @@ mod file_count_tests {
         }
 
         // Create a Walk instance and collect the entries.
-        let entries = Walk::new(dir_path)?.collect()?;
+        let entries = Walk::new(dir_path, None)?.collect()?;
         // Walk typically returns only the files in the root (when not recursing),
         // so we expect exactly `num_files` entries.
-        assert_eq!(entries.len(), num_files, "Walk API did not yield the expected number of file entries");
+        assert_eq!(entries.files.len(), num_files, "Walk API did not yield the expected number of file entries");
         Ok(())
     }
 
@@ -1211,15 +1211,15 @@ mod file_count_tests {
         }
 
         // Create a Scandir instance and collect the detailed entries.
-        let entries = Scandir::new(dir_path)?.collect()?;
+        let entries = Scandir::new(dir_path, None)?.collect()?;
         // Filter only entries that are files (in case directories are also returned).
-        let file_count = entries.iter().filter(|entry| entry.file_type().is_file()).count();
+        let file_count = entries.results.iter().filter(|entry| (*entry).file_type().is_file()).count();
         assert_eq!(file_count, num_files, "Scandir API did not return the expected number of file entries");
         Ok(())
     }
 
     #[test]
-    fn test_file_count_methods() {
+    fn test_file_count_methods() -> Result<(), Box<dyn std::error::Error>> {
         // Create a temporary directory.
         let tmp_dir = tempdir().unwrap();
         let dir_path = tmp_dir.path();
@@ -1256,6 +1256,32 @@ mod file_count_tests {
 
         let (c, t) = count_using_getdents64(dir_path);
         results.push(("Raw getdents64 syscall", c, t));
+        
+        // Using scandir-rs's Count API:
+        {
+            let start = Instant::now();
+            let stats = Count::new(dir_path)?.collect()?;
+            let duration = start.elapsed();
+            results.push(("scandir Count API", stats.files.try_into().unwrap(), duration));
+        }
+        
+        // Using scandir-rs's Walk API:
+        {
+            let start = Instant::now();
+            let entries = Walk::new(dir_path, None)?.collect()?;
+            let count = entries.files.len();
+            let duration = start.elapsed();
+            results.push(("scandir Walk API", count, duration));
+        }
+        
+        // Using scandir-rs's Scandir API:
+        {
+            let start = Instant::now();
+            let entries = Scandir::new(dir_path, None)?.collect()?;
+            let count = entries.results.iter().filter(|entry| (*entry).file_type().is_file()).count();
+            let duration = start.elapsed();
+            results.push(("scandir Scandir API", count, duration));
+        }
 
 
         println!("File counting results (expected count: {}):", num_files);
@@ -1267,21 +1293,13 @@ mod file_count_tests {
                 duration,
                 duration.as_micros()
             );
-            if desc == "Statistical estimation" {
-                let diff = if count > num_files { count - num_files } else { num_files - count };
-                assert!(
-                    (diff as f64) / (num_files as f64) < 0.5,
-                    "{} estimation not within 50% of expected count",
-                    desc
-                );
-            } else {
-                assert_eq!(
-                    count, num_files,
-                    "{} did not count {} files correctly",
-                    desc, num_files
-                );
-            }
+            assert_eq!(
+                count, num_files,
+                "{} did not count {} files correctly",
+                desc, num_files
+            );
         }
+        Ok(())
     }
 }
 
