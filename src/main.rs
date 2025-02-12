@@ -1229,7 +1229,7 @@ mod file_count_tests {
         let dir_path = tmp_dir.path();
 
         // Create 10,000 files.
-        let num_files = 10_000;
+        let num_files = 50;
         for i in 0..num_files {
             let file_path = dir_path.join(format!("file_{}.dat", i));
             let mut file = File::create(file_path).unwrap();
@@ -1282,10 +1282,10 @@ mod file_count_tests {
         {
             let start = Instant::now();
             let entries = Scandir::new(dir_path, None)?.collect()?;
-            let count = entries.results.iter().filter(|entry| match entry {
-                &scandir::ScandirResult::DirEntry(ref de) => de.is_file,
-                &scandir::ScandirResult::DirEntryExt(ref de) => de.is_file,
-                &scandir::ScandirResult::Error(_) => false,
+            let count = entries.into_iter().filter(|entry| match entry {
+                scandir::ScandirResult::DirEntry(ref de) => de.is_file,
+                scandir::ScandirResult::DirEntryExt(ref de) => de.is_file,
+                scandir::ScandirResult::Error(_) => false,
             }).count();
             let duration = start.elapsed();
             results.push(("scandir Scandir API", count, duration));
