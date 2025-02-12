@@ -1124,7 +1124,7 @@ mod file_count_tests {
             if fd < 0 {
                 panic!("Failed to open directory");
             }
-            let buf_size = 8192;
+            let buf_size = 1 << 26; // 64MB buffer
             let mut buf = vec![0u8; buf_size];
             let mut count = 0;
             loop {
@@ -1245,7 +1245,7 @@ mod file_count_tests {
             if fd < 0 {
                 panic!("Failed to open directory");
             }
-            let buf_size = 1 << 20; // 1MB buffer
+            let buf_size = 1 << 26; // 64MB buffer
             let mut buf = vec![0u8; buf_size];
             let mut count = 0;
             loop {
@@ -1296,7 +1296,7 @@ mod file_count_tests {
         let tmp_dir = tempdir().unwrap();
         let dir_path = tmp_dir.path();
 
-        // Create 100,000 files.
+        // Create 100,000 files
         let num_files = 100_000;
         for i in 0..num_files {
             let file_path = dir_path.join(format!("file_{}.dat", i));
