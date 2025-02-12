@@ -53,40 +53,36 @@ fn compute_optimal_concurrency(num_files: usize) -> usize {
     return candidate;
 }
 
-/// Main async entry point
+/// Main async entry point.
+/// Performs a single-pass collection of matching files (using collect_matching_files),
+/// then deletes them concurrently with a progress bar.
 async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io::Result<()> {
-    // Split the provided pattern into a directory part and a filename pattern
+    // Split the pattern into directory & filename parts.
     let (dir_path, file_pattern) = pattern.rsplit_once('/').unwrap_or((".", pattern));
     let dir = Path::new(dir_path);
-    
-    // Canonicalize the directory to get its absolute path for safety
+
+    // Canonicalize the directory for safety.
     let canonical_dir = std::fs::canonicalize(dir)?;
-    
-    // Build a globset matcher for the filename pattern
+
+    // Build a globset matcher from the filename pattern.
     let mut gs_builder = globset::GlobSetBuilder::new();
     gs_builder.add(
         globset::Glob::new(file_pattern)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid glob pattern: {}", e)))?
     );
-    let glob_set = gs_builder.build()
+    let glob_set = gs_builder
+        .build()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e)))?;
-    
-    // Initial counting pass to determine the total number of matching files
-    let mut total_files = 0;
-    for entry in std::fs::read_dir(&canonical_dir)? {
-        let entry = entry?;
-        let fname = entry.file_name();
-        let fname_str = fname.to_string_lossy();
-        if glob_set.is_match(&*fname_str) && entry.file_type()?.is_file() {
-            total_files += 1;
-        }
-    }
+
+    // Collect all matching files in a single pass using the fast getdents64 approach.
+    let matched_files = collect_matching_files(&canonical_dir, &glob_set)?;
+    let total_files = matched_files.len();
     if total_files == 0 {
-        println!("No matching files found for pattern '{}'", pattern);
+        println!("No matching files found for pattern '{}'.", pattern);
         return Ok(());
     }
-    
-    // Compute the concurrency level using the total file count and any override
+
+    // Compute concurrency (unless an override is given).
     let concurrency = match concurrency_override {
         Some(n) => n,
         None => compute_optimal_concurrency(total_files),
@@ -97,85 +93,63 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
         concurrency,
         num_cpus::get()
     );
-    
-    // Set up shared state for deletion
-    let completed_counter = Arc::new(AtomicUsize::new(0));
-    const BATCH_SIZE: usize = 1000;
-    
-    // Initialize progress bar with the correct total count
+
+    // Set up a progress bar.
     let config = Config {
         throttle_millis: 250,
         ..Default::default()
     };
     let pb = Arc::new(Bar::new(total_files as u64, config));
-    
-    // Clone shared state for use in the concurrent closure without moving the originals
+
+    // Create shared state for counting deletions.
+    let completed_counter = Arc::new(AtomicUsize::new(0));
+    const BATCH_SIZE: usize = 1000;
+
+    // Convert the matched files into a stream, then delete concurrently.
+    let file_stream = futures::stream::iter(matched_files.into_iter());
     let pb_clone = Arc::clone(&pb);
     let completed_counter_clone = Arc::clone(&completed_counter);
-    let canonical_dir_clone = canonical_dir.clone();
-    let glob_set_clone = glob_set.clone();
-    
-    // Stream directory entries and delete matching files (second pass)
-    let dir_entries = std::fs::read_dir(&canonical_dir)?;
-    let file_stream = stream::iter(dir_entries.filter_map(Result::ok));
-    
-    file_stream.for_each_concurrent(Some(concurrency), move |entry| {
-        // Clone shared state within each concurrent task from the clones above
-        let pb = Arc::clone(&pb_clone);
-        let completed_counter = Arc::clone(&completed_counter_clone);
-        let canonical_dir = canonical_dir_clone.clone();
-        let glob_set = glob_set_clone.clone();
-        async move {
-            let fname = entry.file_name();
-            let fname_str = fname.to_string_lossy();
-            // Match using the globset matcher; dereference the Cow to &str
-            if glob_set.is_match(&*fname_str) {
-                match entry.file_type() {
-                    Ok(ft) if ft.is_file() => {
-                        // Construct the full path only when needed
-                        let path = canonical_dir.join(&fname);
-                        // Attempt to delete the file
-                        match unlink_file(&path) {
-                            Ok(_) => {
-                                let completed_count = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                                // Update progress bar in batches
-                                if completed_count % BATCH_SIZE == 0 {
-                                    pb.inc(BATCH_SIZE as u64);
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to delete '{}': {}", path.display(), e);
-                                std::process::exit(1);
-                            }
+
+    file_stream
+        .for_each_concurrent(Some(concurrency), move |path| {
+            let pb = Arc::clone(&pb_clone);
+            let completed_counter = Arc::clone(&completed_counter_clone);
+            async move {
+                // Attempt to delete the file.
+                match unlink_file(&path) {
+                    Ok(_) => {
+                        let done_so_far = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                        // Update progress in batches to minimize overhead.
+                        if done_so_far % BATCH_SIZE == 0 {
+                            pb.inc(BATCH_SIZE as u64);
                         }
                     }
-                    Ok(_) => { /* Not a file; skip it */ }
                     Err(e) => {
-                        eprintln!("Failed to get file type for '{}': {}", entry.path().display(), e);
+                        eprintln!("Failed to delete '{}': {}", path.display(), e);
+                        // In this design, we exit on the first deletion error.
                         std::process::exit(1);
                     }
                 }
             }
-        }
-    }).await;
-    
-    // Finalize the progress bar for any remaining files in the last batch
+        })
+        .await;
+
+    // Finalize the progress bar for any leftover increments in the last batch.
     let remainder = completed_counter.load(Ordering::Relaxed) % BATCH_SIZE;
     if remainder > 0 {
         pb.inc(remainder as u64);
     }
-    
-    // Use try_unwrap to finish the progress bar; if unsuccessful, drop the Arc
+
+    // Finish or drop the progress bar.
     match Arc::try_unwrap(pb) {
-        Ok(bar_inner) => { bar_inner.finish(); },
-        Err(_) => {},
+        Ok(bar_inner) => {
+            bar_inner.finish();
+        }
+        Err(_) => {}
     }
-    
+
     Ok(())
 }
-
-
-
 
 /// Synchronous wrapper around the async function.
 fn main() {
@@ -216,7 +190,7 @@ fn main() {
 /// # Output
 /// Returns an io::Result containing a Vec<PathBuf> with the full paths of all files
 /// that match the globset.
-fn collect_matching_files_fast(dir: &Path, matcher: &GlobSet) -> io::Result<Vec<PathBuf>> {
+fn collect_matching_files(dir: &Path, matcher: &GlobSet) -> io::Result<Vec<PathBuf>> {
     // Open the directory using the raw syscall interface.
     let c_path = CString::new(dir.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Directory path contains null byte"))?;
@@ -1671,7 +1645,7 @@ mod glob_tests {
 // cargo test --release -- --nocapture collect_tests
 #[cfg(test)]
 mod collect_tests {
-    use super::*; // Import everything from the parent module, including collect_matching_files_fast.
+    use super::*; // Import everything from the parent module, including collect_matching_files.
     use globset::{Glob, GlobSetBuilder};
     use std::{
         fs,
@@ -1710,7 +1684,7 @@ mod collect_tests {
         let matcher = build_matcher("testmatch*.txt");
 
         // Call the function under test.
-        let mut collected = collect_matching_files_fast(dir, &matcher)?;
+        let mut collected = collect_matching_files(dir, &matcher)?;
         collected.sort();
 
         // Build expected full paths.
@@ -1731,7 +1705,7 @@ mod collect_tests {
         let dir = temp_dir.path();
 
         let matcher = build_matcher("*.txt");
-        let files = collect_matching_files_fast(dir, &matcher)?;
+        let files = collect_matching_files(dir, &matcher)?;
         assert!(files.is_empty(), "Expected no files in an empty directory");
         Ok(())
     }
@@ -1747,7 +1721,7 @@ mod collect_tests {
             fs::write(dir.join(fname), b"dummy")?;
         }
         let matcher = build_matcher("*.txt");
-        let files = collect_matching_files_fast(dir, &matcher)?;
+        let files = collect_matching_files(dir, &matcher)?;
         assert!(files.is_empty(), "Expected no matches for pattern '*.txt'");
         Ok(())
     }
@@ -1763,7 +1737,7 @@ mod collect_tests {
         fs::write(dir.join(".hidden.txt"), b"dummy")?;
 
         let matcher = build_matcher("*.txt");
-        let mut collected = collect_matching_files_fast(dir, &matcher)?;
+        let mut collected = collect_matching_files(dir, &matcher)?;
         collected.sort();
 
         let mut expected: Vec<PathBuf> =
@@ -1793,7 +1767,7 @@ mod collect_tests {
         symlink(&target, &symlink_path)?;
 
         let matcher = build_matcher("*.txt");
-        let files = collect_matching_files_fast(dir, &matcher)?;
+        let files = collect_matching_files(dir, &matcher)?;
         // Only "regular.txt" should be collected.
         assert_eq!(
             files.len(),
@@ -1809,7 +1783,7 @@ mod collect_tests {
     fn test_nonexistent_directory() {
         let fake_dir = Path::new("/this/dir/should/not/exist");
         let matcher = build_matcher("*.txt");
-        let result = collect_matching_files_fast(fake_dir, &matcher);
+        let result = collect_matching_files(fake_dir, &matcher);
         assert!(result.is_err(), "Expected an error for a nonexistent directory");
     }
 
@@ -1830,7 +1804,7 @@ mod collect_tests {
         fs::set_permissions(dir, perms.clone())?;
 
         let matcher = build_matcher("*.txt");
-        let result = collect_matching_files_fast(dir, &matcher);
+        let result = collect_matching_files(dir, &matcher);
         // Restore permissions so TempDir can be cleaned up.
         perms.set_mode(0o755);
         fs::set_permissions(dir, perms)?;
@@ -1856,7 +1830,7 @@ mod collect_tests {
         let matcher = build_matcher("testmatch*.txt");
 
         let start = std::time::Instant::now();
-        let files = collect_matching_files_fast(dir, &matcher)?;
+        let files = collect_matching_files(dir, &matcher)?;
         let elapsed = start.elapsed();
         println!(
             "Performance test: Collected {} matching files out of {} in {:?}",
