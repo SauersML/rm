@@ -407,7 +407,7 @@ mod performance_tests {
             true,
         ));
         results.push(run_benchmark("Large files (100 x 10 MB)", 100, 10240, false, false));
-        results.push(run_benchmark("Medium files (50 x 100 KB)", 50, 100, false, false));
+        results.push(run_benchmark("Medium files (2000 x 100 KB)", 50, 100, false, false));
         results.push(run_benchmark("Huge files (10 x 50 MB)", 10, 51200, false, false));
 
         println!("\n===== Performance Summary =====\n");
