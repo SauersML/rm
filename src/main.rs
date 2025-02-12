@@ -1392,237 +1392,209 @@ mod glob_tests {
     use globset::{Glob, GlobBuilder, GlobSetBuilder};
     use std::fs::{self, File};
     use std::io;
-    use std::path::Path;
+    use std::path::{Path};
     use std::time::{Duration, Instant};
+    use tempfile::TempDir;
 
-    const NUM_FILES: usize = 50_000;
-    const MATCH_PATTERN: &str = "testmatch*.txt";
-    const TEMP_DIR_PREFIX: &str = "glob_perf_test";
+    // Define an enum to select the matching method.
+    #[derive(Clone)]
+    enum Method {
+        Glob,                        // glob crate, case-sensitive
+        GlobSetFilename,             // globset matching on file names, case-sensitive
+        GlobSetFullPath,             // globset matching on full paths, case-sensitive
+        GlobCaseInsensitive,         // glob crate, case-insensitive
+        GlobSetCaseInsensitive,      // globset matching on file names, case-insensitive
+        GlobSetFullPathCaseInsensitive, // globset matching on full paths, case-insensitive
+    }
 
-    // Helper function to create temporary files.
-    fn create_temp_files(dir: &Path) -> io::Result<()> {
-        for i in 0..NUM_FILES {
-            let file_name = if i % 2 == 0 {
-                format!("testmatch{}.txt", i)
-            } else {
-                format!("nomatch{}.txt", i)
-            };
-            let file_path = dir.join(file_name);
-            File::create(file_path)?;
+    /// Creates temporary files in the given directory.
+    /// If `use_subdirs` is true, creates two subdirectories and distributes files between them.
+    /// Half of the files are named to match patterns (e.g. "testmatch...") and the other half to not match.
+    fn create_temp_files(dir: &Path, num_files: usize, use_subdirs: bool) -> io::Result<()> {
+        if use_subdirs {
+            let subdirs = ["subdir1", "subdir2"];
+            for sub in &subdirs {
+                fs::create_dir_all(dir.join(sub))?;
+            }
+            for i in 0..num_files {
+                let sub = if i % 2 == 0 { "subdir1" } else { "subdir2" };
+                let file_name = if i % 2 == 0 {
+                    // Files that should match patterns that require "testmatch" prefix.
+                    format!("testmatch{}_{}.txt", sub, i)
+                } else {
+                    format!("nomatch{}_{}.txt", sub, i)
+                };
+                let file_path = dir.join(sub).join(file_name);
+                File::create(file_path)?;
+            }
+        } else {
+            for i in 0..num_files {
+                let file_name = if i % 2 == 0 {
+                    format!("testmatch{}.txt", i)
+                } else {
+                    format!("nomatch{}.txt", i)
+                };
+                let file_path = dir.join(file_name);
+                File::create(file_path)?;
+            }
         }
         Ok(())
     }
 
-    // Helper function to measure and print duration.
-    fn measure_duration(start: Instant, test_name: &str) -> Duration {
+    /// Runs a single benchmark for the specified method.
+    /// Returns a tuple of (elapsed duration, number of files matched).
+    fn run_benchmark(
+        num_files: usize,
+        pattern: &str,
+        use_subdirs: bool,
+        method: Method,
+    ) -> io::Result<(Duration, usize)> {
+        // Create a fresh temporary directory for this test run.
+        let temp_dir = TempDir::new()?;
+        let dir_path = temp_dir.path();
+
+        // Populate the directory with files.
+        create_temp_files(dir_path, num_files, use_subdirs)?;
+
+        // Build the glob pattern strings.
+        let glob_pattern = dir_path.join(pattern).to_string_lossy().to_string();
+        let full_pattern = format!("{}/{}", dir_path.to_string_lossy(), pattern);
+
+        let start = Instant::now();
+        let mut count = 0;
+        match method {
+            Method::Glob => {
+                // Use the glob crate (case-sensitive).
+                for entry in glob(&glob_pattern).expect("Failed to read glob pattern") {
+                    if let Ok(path) = entry {
+                        if path.is_file() {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            Method::GlobSetFilename => {
+                // Use globset matching on file names (case-sensitive).
+                let mut builder = GlobSetBuilder::new();
+                let compiled = Glob::new(pattern)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                builder.add(compiled);
+                let set = builder.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                for entry in fs::read_dir(dir_path)? {
+                    let entry = entry?;
+                    if entry.file_type()?.is_file() && set.is_match(entry.file_name()) {
+                        count += 1;
+                    }
+                }
+            }
+            Method::GlobSetFullPath => {
+                // Use globset matching on full paths (case-sensitive).
+                let mut builder = GlobSetBuilder::new();
+                let compiled = Glob::new(&full_pattern)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                builder.add(compiled);
+                let set = builder.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                for entry in fs::read_dir(dir_path)? {
+                    let entry = entry?;
+                    if entry.file_type()?.is_file() && set.is_match(&entry.path()) {
+                        count += 1;
+                    }
+                }
+            }
+            Method::GlobCaseInsensitive => {
+                // Use glob_with with case-insensitive options.
+                let options = MatchOptions {
+                    case_sensitive: false,
+                    require_literal_separator: false,
+                    require_literal_leading_dot: false,
+                };
+                for entry in glob_with(&glob_pattern, options).expect("Failed to read glob pattern") {
+                    if let Ok(path) = entry {
+                        if path.is_file() {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            Method::GlobSetCaseInsensitive => {
+                // Use globset on file names, case-insensitive.
+                let mut builder = GlobSetBuilder::new();
+                let compiled = GlobBuilder::new(pattern)
+                    .case_insensitive(true)
+                    .build()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                builder.add(compiled);
+                let set = builder.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                for entry in fs::read_dir(dir_path)? {
+                    let entry = entry?;
+                    if entry.file_type()?.is_file() && set.is_match(entry.file_name()) {
+                        count += 1;
+                    }
+                }
+            }
+            Method::GlobSetFullPathCaseInsensitive => {
+                // Use globset on full paths, case-insensitive.
+                let mut builder = GlobSetBuilder::new();
+                let compiled = GlobBuilder::new(&full_pattern)
+                    .case_insensitive(true)
+                    .build()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                builder.add(compiled);
+                let set = builder.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                for entry in fs::read_dir(dir_path)? {
+                    let entry = entry?;
+                    if entry.file_type()?.is_file() && set.is_match(&entry.path()) {
+                        count += 1;
+                    }
+                }
+            }
+        }
         let duration = start.elapsed();
-        println!("{}: {:?}", test_name, duration);
-        duration
+        Ok((duration, count))
     }
 
     #[test]
-    fn performance_comparison() -> io::Result<()> {
-        // Create a temporary directory.
-        let temp_dir = tempfile::Builder::new()
-            .prefix(TEMP_DIR_PREFIX)
-            .tempdir()?;
-        let dir_path = temp_dir.path();
+    fn comprehensive_benchmark() -> io::Result<()> {
+        // Define a set of file counts to test.
+        let file_counts = vec![100, 1_000, 10_000, 100_000];
+        // Define a set of glob patterns to test.
+        let patterns = vec![
+            "*.txt",                // simple pattern
+            "testmatch*.txt",       // specific pattern requiring a "testmatch" prefix
+            "test[0-9]match*.txt",   // pattern with a character range
+        ];
+        // Test both without subdirectories and with subdirectories.
+        let subdir_options = vec![false, true];
+        // Define the methods to test (both case-sensitive and case-insensitive).
+        let methods = vec![
+            ("glob", Method::Glob),
+            ("globset filename", Method::GlobSetFilename),
+            ("globset fullpath", Method::GlobSetFullPath),
+            ("glob (case-insensitive)", Method::GlobCaseInsensitive),
+            ("globset (case-insensitive, filename)", Method::GlobSetCaseInsensitive),
+            ("globset (case-insensitive, fullpath)", Method::GlobSetFullPathCaseInsensitive),
+        ];
 
-        create_temp_files(dir_path)?;
-
-        // --- glob crate test ---
-        let start_glob = Instant::now();
-        let mut glob_count = 0;
-        let glob_pattern = dir_path.join(MATCH_PATTERN).to_string_lossy().to_string();
-        for entry in glob(&glob_pattern).expect("Failed to read glob pattern") {
-            if let Ok(_path) = entry {
-                glob_count += 1;
+        // Loop over each combination of file count, pattern, and subdirectory option.
+        for &count in &file_counts {
+            for pattern in &patterns {
+                for &use_subdirs in &subdir_options {
+                    println!("===========================================");
+                    println!(
+                        "Test: {} files, Pattern: '{}', Subdirectories: {}",
+                        count, pattern, use_subdirs
+                    );
+                    for (method_name, method) in &methods {
+                        let (duration, matched) = run_benchmark(count, pattern, use_subdirs, method.clone())?;
+                        println!(
+                            "{:40} => Duration: {:?}, Matched: {}",
+                            method_name, duration, matched
+                        );
+                    }
+                    println!("===========================================");
+                }
             }
         }
-        let duration_glob = measure_duration(start_glob, "glob crate");
-
-        // --- globset crate test (matching only file names) ---
-        let start_globset = Instant::now();
-        let mut globset_count = 0;
-        let mut builder = GlobSetBuilder::new();
-        let compiled_glob = Glob::new(MATCH_PATTERN)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        builder.add(compiled_glob);
-        let set = builder.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-        for entry in fs::read_dir(dir_path)? {
-            let entry = entry?;
-            // Using only the file name here.
-            if set.is_match(entry.file_name()) {
-                globset_count += 1;
-            }
-        }
-        let duration_globset = measure_duration(start_globset, "globset crate");
-
-        // --- globset crate test (with full Path) ---
-        let start_globset_path = Instant::now();
-        let mut globset_path_count = 0;
-        let mut builder_path = GlobSetBuilder::new();
-        // Build a pattern that includes the directory.
-        let full_pattern = format!("{}/{}", dir_path.to_string_lossy(), MATCH_PATTERN);
-        let compiled_glob_path = Glob::new(&full_pattern)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        builder_path.add(compiled_glob_path);
-        let set_path = builder_path.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-        // Now check each entry's full path.
-        for entry in fs::read_dir(dir_path)? {
-            let entry = entry?;
-            if set_path.is_match(&entry.path()) {
-                globset_path_count += 1;
-            }
-        }
-        let duration_globset_path = measure_duration(start_globset_path, "globset crate (with Path)");
-
-        // Assertions.
-        assert_eq!(
-            glob_count,
-            NUM_FILES / 2,
-            "glob crate matched incorrect number of files"
-        );
-        assert_eq!(
-            globset_count,
-            NUM_FILES / 2,
-            "globset crate matched incorrect number of files"
-        );
-        assert_eq!(
-            globset_path_count,
-            NUM_FILES / 2,
-            "globset crate (with Path) matched incorrect number of files"
-        );
-
-        if duration_glob < duration_globset {
-            println!("glob crate was faster");
-        } else if duration_globset < duration_glob {
-            println!("globset crate was faster");
-        } else {
-            println!("glob and globset were equally fast");
-        }
-
-        if duration_glob < duration_globset_path {
-            println!("glob crate was faster than globset (with Path)");
-        } else if duration_globset_path < duration_glob {
-            println!("globset crate (with Path) was faster");
-        } else {
-            println!("glob and globset (with Path) were equally fast");
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn performance_comparison_case_insensitive() -> io::Result<()> {
-        let temp_dir = tempfile::Builder::new()
-            .prefix(TEMP_DIR_PREFIX)
-            .tempdir()?;
-        let dir_path = temp_dir.path();
-
-        // Create files using uppercase names.
-        for i in 0..NUM_FILES {
-            let file_name = if i % 2 == 0 {
-                format!("TESTMATCH{}.TXT", i)
-            } else {
-                format!("NOMATCH{}.TXT", i)
-            };
-            let file_path = dir_path.join(file_name);
-            File::create(file_path)?;
-        }
-
-        // --- glob crate test (case-insensitive) ---
-        let start_glob = Instant::now();
-        let mut glob_count = 0;
-        let glob_pattern = dir_path.join(MATCH_PATTERN).to_string_lossy().to_string();
-        let options = MatchOptions {
-            case_sensitive: false,
-            require_literal_separator: false,
-            require_literal_leading_dot: false,
-        };
-        for entry in glob_with(&glob_pattern, options).expect("Failed to read glob pattern") {
-            if let Ok(_path) = entry {
-                glob_count += 1;
-            }
-        }
-        let duration_glob = measure_duration(start_glob, "glob crate (case-insensitive)");
-
-        // --- globset crate test (case-insensitive, matching file names) ---
-        let start_globset = Instant::now();
-        let mut globset_count = 0;
-        let mut builder = GlobSetBuilder::new();
-        // Use GlobBuilder for case-insensitive matching.
-        let compiled_glob = GlobBuilder::new(MATCH_PATTERN)
-            .case_insensitive(true)
-            .build()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        builder.add(compiled_glob);
-        let set = builder.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        for entry in fs::read_dir(dir_path)? {
-            let entry = entry?;
-            if set.is_match(entry.file_name()) {
-                globset_count += 1;
-            }
-        }
-        let duration_globset = measure_duration(start_globset, "globset crate (case-insensitive)");
-
-        // --- globset crate test (case-insensitive with full Path) ---
-        let start_globset_path = Instant::now();
-        let mut globset_path_count = 0;
-        let mut builder_path = GlobSetBuilder::new();
-        let full_pattern = format!("{}/{}", dir_path.to_string_lossy(), MATCH_PATTERN);
-        let compiled_glob_path = GlobBuilder::new(&full_pattern)
-            .case_insensitive(true)
-            .build()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        builder_path.add(compiled_glob_path);
-        let set_path = builder_path.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        for entry in fs::read_dir(dir_path)? {
-            let entry = entry?;
-            if set_path.is_match(&entry.path()) {
-                globset_path_count += 1;
-            }
-        }
-        let duration_globset_path = measure_duration(
-            start_globset_path,
-            "globset crate (case-insensitive with Path)",
-        );
-
-        // Assertions.
-        assert_eq!(
-            glob_count,
-            NUM_FILES / 2,
-            "glob crate matched incorrect number of files"
-        );
-        assert_eq!(
-            globset_count,
-            NUM_FILES / 2,
-            "globset crate matched incorrect number of files"
-        );
-        assert_eq!(
-            globset_path_count,
-            NUM_FILES / 2,
-            "globset crate (with Path) matched incorrect number of files"
-        );
-
-        if duration_glob < duration_globset {
-            println!("glob crate was faster (case-insensitive)");
-        } else if duration_globset < duration_glob {
-            println!("globset crate was faster (case-insensitive)");
-        } else {
-            println!("glob and globset were equally fast (case-insensitive)");
-        }
-
-        if duration_glob < duration_globset_path {
-            println!("glob crate was faster than globset (with Path, case-insensitive)");
-        } else if duration_globset_path < duration_glob {
-            println!("globset crate (with Path) was faster (case-insensitive)");
-        } else {
-            println!("glob and globset (with Path) were equally fast (case-insensitive)");
-        }
-
         Ok(())
     }
 }
