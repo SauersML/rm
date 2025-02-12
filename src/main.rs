@@ -1296,8 +1296,8 @@ mod file_count_tests {
         let tmp_dir = tempdir().unwrap();
         let dir_path = tmp_dir.path();
 
-        // Create 10,000 files.
-        let num_files = 50;
+        // Create 100,000 files.
+        let num_files = 100_000;
         for i in 0..num_files {
             let file_path = dir_path.join(format!("file_{}.dat", i));
             let mut file = File::create(file_path).unwrap();
