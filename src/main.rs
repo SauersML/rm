@@ -10,7 +10,6 @@ use std::{
 };
 
 use futures::{stream, StreamExt};
-use glob::glob;
 use num_cpus;
 use tokio::runtime::Builder;
 use std::os::unix::ffi::OsStrExt;
@@ -53,38 +52,44 @@ fn compute_optimal_concurrency(num_files: usize) -> usize {
 
 /// Main async entry point
 async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io::Result<()> {
-    // Gather files
-    let mut files = Vec::new();
-    for entry in glob(pattern).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Invalid glob pattern: {}", e),
-        )
-    })? {
-        match entry {
-            Ok(path) => {
-                if path.is_file() {
-                    files.push(path);
+    // Split the provided pattern into a directory part and a filename pattern.
+    let (dir_path, file_pattern) = pattern.rsplit_once('/').unwrap_or((".", pattern));
+    let dir = Path::new(dir_path);
+    // Canonicalize the directory to get its absolute path for safety
+    let canonical_dir = std::fs::canonicalize(dir)?;
+
+    // Build a globset matcher for the filename pattern
+    // Convert any globset errors into io::Error
+    let mut gs_builder = globset::GlobSetBuilder::new();
+    gs_builder.add(
+        globset::Glob::new(file_pattern)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid glob pattern: {}", e)))?
+    );
+    let glob_set = gs_builder.build()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e)))?;
+
+    // First pass: count the files that match the pattern
+    let mut total_files = 0;
+    for entry in std::fs::read_dir(&canonical_dir)? {
+        let entry = entry?;
+        if let Some(fname) = entry.path().file_name() {
+            if glob_set.is_match(fname) {
+                if entry.file_type()?.is_file() {
+                    total_files += 1;
                 }
-            }
-            Err(e) => {
-                eprintln!("Glob error while matching {}: {}", pattern, e);
             }
         }
     }
-
-    let total_files = files.len();
     if total_files == 0 {
         println!("No matching files found for pattern '{}'.", pattern);
         return Ok(());
     }
 
-    // Compute optimal concurrency, or use override
+    // Compute the concurrency level using the total file count and any override
     let concurrency = match concurrency_override {
         Some(n) => n,
         None => compute_optimal_concurrency(total_files),
     };
-
     println!(
         "[INFO] Deleting {} files with concurrency = {} (CPU cores = {})",
         total_files,
@@ -92,53 +97,74 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
         num_cpus::get()
     );
 
-    // Set up progress bar using progression (updates throttled to 250 ms max)
+    // Set up the progress bar with throttling.
     let config = Config {
         throttle_millis: 250,
         ..Default::default()
     };
     let pb = Arc::new(Bar::new(total_files as u64, config));
-
-    // Delete files with controlled concurrency
     let completed_counter = Arc::new(AtomicUsize::new(0));
-    let file_stream = stream::iter(files.into_iter());
+    const BATCH_SIZE: usize = 1000;
 
-    file_stream
-        .for_each_concurrent(Some(concurrency), |path| {
-            let pb = Arc::clone(&pb);
-            let completed_counter = completed_counter.clone();
-            async move {
+    // Second pass: stream through the directory entries for deletion.
+    // We stream the entries from the canonicalized directory.
+    let dir_entries = std::fs::read_dir(&canonical_dir)?;
+    let file_stream = stream::iter(dir_entries.filter_map(Result::ok));
 
-                    //   1. Atomic Counter Operations:  Incrementing `completed_counter` (even though atomic) still involves
-                    //      some overhead, especially with frequent updates.
-                    //   2. Progress Bar I/O and Rendering: Updating the `indicatif::ProgressBar` involves I/O operations
-                    //      to the terminal and re-rendering the progress bar display. Frequent I/O can be relatively slow.
-                    //
-                    // To reduce this overhead, we should implement batched progress bar updates. Instead of updating
-                    // after every deletion, we can update the progress bar less frequently.
-                match unlink_file(&path) {
-                    Ok(_) => {
-                        completed_counter.fetch_add(1, Ordering::Relaxed);
-                        pb.inc(1);
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to delete '{}': {}", path.display(), e);
-                        // Still count errors towards completion for accurate progress.
-                        completed_counter.fetch_add(1, Ordering::Relaxed);
-                        pb.inc(1);
+    file_stream.for_each_concurrent(Some(concurrency), |entry| {
+        let pb = Arc::clone(&pb);
+        let completed_counter = Arc::clone(&completed_counter);
+        // Clone the globset matcher (which is cheap) for use within this async block
+        let glob_set = glob_set.clone();
+        async move {
+            let path = entry.path();
+            if let Some(fname) = path.file_name() {
+                // Check the filename against the globset
+                if glob_set.is_match(fname) {
+                    // Make sure the entry is a file
+                    match entry.file_type() {
+                        Ok(ft) if ft.is_file() => {
+                            // Attempt to delete the file
+                            match unlink_file(&path) {
+                                Ok(_) => {
+                                    // Atomically increment the counter
+                                    let count = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                                    // Update the progress bar in batches.
+                                    if count % BATCH_SIZE == 0 {
+                                        pb.inc(BATCH_SIZE as u64);
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to delete '{}': {}", path.display(), e);
+                                    std::process::exit(1); // Fail fast on error.
+                                }
+                            }
+                        }
+                        Ok(_) => { /* Not a file; skip it. */ }
+                        Err(e) => {
+                            eprintln!("Failed to get file type for '{}': {}", path.display(), e);
+                            std::process::exit(1);
+                        }
                     }
                 }
             }
-        })
-        .await;
+        }
+    }).await;
 
+    // Finalize the progress bar for any remaining files in the last incomplete batch
+    let remainder = completed_counter.load(Ordering::Relaxed) % BATCH_SIZE;
+    if remainder > 0 {
+        pb.inc(remainder as u64);
+    }
     match Arc::try_unwrap(pb) {
         Ok(bar_inner) => { bar_inner.finish(); },
-        Err(arc) => { drop(arc); },
+        Err(_) => {},
     }
 
     Ok(())
 }
+
+
 
 /// Synchronous wrapper around the async function.
 fn main() {
@@ -807,7 +833,6 @@ mod empirical_tests {
         println!("F_DISK_A_FIT = {:.8}", a);
         println!("F_DISK_B_FIT = {:.8}", b);
     
-        // Sanity checks: ensure both parameters are positive.
         assert!(a > 0.0, "Fitted parameter 'a' should be positive; got {:.8}", a);
         assert!(b > 0.0, "Fitted parameter 'b' should be positive; got {:.8}", b);
     }
