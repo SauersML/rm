@@ -1159,21 +1159,6 @@ mod file_count_tests {
         }
     }
 
-    // Uses an external shell command that first enables nullglob.
-    fn count_using_external_nullglob(path: &Path) -> (usize, Duration) {
-        let start = Instant::now();
-        // This command uses: shopt -s nullglob; files=(*); echo "${#files[@]}"
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("shopt -s nullglob; files=(*); echo \"${#files[@]}\"")
-            .current_dir(path)
-            .output()
-            .expect("Failed to execute external nullglob command");
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        let count = output_str.trim().parse::<usize>().unwrap_or(0);
-        (count, start.elapsed())
-    }
-
     // Uses statistical estimation based on directory metadata.
     // Because directory metadata size may not scale exactly with entry count,
     // we allow a 5% error margin.
@@ -1239,9 +1224,6 @@ mod file_count_tests {
 
         let (c, t) = count_using_getdents64(dir_path);
         results.push(("Raw getdents64 syscall", c, t));
-    
-        let (c, t) = count_using_external_nullglob(dir_path);
-        results.push(("External command (nullglob)", c, t));
 
         let (c, t) = count_using_statistical_estimation(dir_path);
         results.push(("Statistical estimation", c, t));
