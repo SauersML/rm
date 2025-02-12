@@ -103,7 +103,7 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
 
     // Create shared state for counting deletions.
     let completed_counter = Arc::new(AtomicUsize::new(0));
-    const BATCH_SIZE: usize = 1000;
+    const BATCH_SIZE: usize = 5000;
 
     // Convert the matched files into a stream, then delete concurrently.
     let file_stream = futures::stream::iter(matched_files.into_iter());
