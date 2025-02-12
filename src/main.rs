@@ -974,10 +974,11 @@ mod file_count_tests {
     use std::ffi::{CStr, CString};
     use std::fs::{self, File};
     use std::io::Write;
-    use std::os::unix::ffi::OsStrExt; // For as_bytes() on OsStr.
+    use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
     use std::time::{Duration, Instant};
 
+    use scandir::{Count, Walk, Scandir};
     use tempfile::tempdir;
     use walkdir::WalkDir;
     use rayon::prelude::*;
@@ -1157,6 +1158,64 @@ mod file_count_tests {
             libc::close(fd);
             (count, start.elapsed())
         }
+    }
+
+    // Test using the Count API (for obtaining directory statistics).
+    #[test]
+    fn test_scandir_count_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Create a temporary directory and populate it with 100 files.
+        let tmp_dir = tempdir()?;
+        let dir_path = tmp_dir.path();
+        let num_files = 100;
+        for i in 0..num_files {
+            let file_path = dir_path.join(format!("file_{}.txt", i));
+            fs::write(file_path, "test")?;
+        }
+
+        // Create a Count instance and collect the file statistics.
+        let count = Count::new(dir_path)?.collect()?;
+        assert_eq!(count, num_files, "Count API did not report the expected number of files");
+        Ok(())
+    }
+
+    // Test using the Walk API (for obtaining a basic file tree).
+    #[test]
+    fn test_scandir_walk_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Create a temporary directory and populate it with 100 files.
+        let tmp_dir = tempdir()?;
+        let dir_path = tmp_dir.path();
+        let num_files = 100;
+        for i in 0..num_files {
+            let file_path = dir_path.join(format!("file_{}.txt", i));
+            fs::write(file_path, "test")?;
+        }
+
+        // Create a Walk instance and collect the entries.
+        let entries = Walk::new(dir_path)?.collect()?;
+        // Walk typically returns only the files in the root (when not recursing),
+        // so we expect exactly `num_files` entries.
+        assert_eq!(entries.len(), num_files, "Walk API did not yield the expected number of file entries");
+        Ok(())
+    }
+
+    // Test using the Scandir API (for obtaining detailed file metadata).
+    #[test]
+    fn test_scandir_scandir_api() -> Result<(), Box<dyn std::error::Error>> {
+        // Create a temporary directory and populate it with 100 files.
+        let tmp_dir = tempdir()?;
+        let dir_path = tmp_dir.path();
+        let num_files = 100;
+        for i in 0..num_files {
+            let file_path = dir_path.join(format!("file_{}.txt", i));
+            fs::write(file_path, "test")?;
+        }
+
+        // Create a Scandir instance and collect the detailed entries.
+        let entries = Scandir::new(dir_path)?.collect()?;
+        // Filter only entries that are files (in case directories are also returned).
+        let file_count = entries.iter().filter(|entry| entry.file_type().is_file()).count();
+        assert_eq!(file_count, num_files, "Scandir API did not return the expected number of file entries");
+        Ok(())
     }
 
     #[test]
