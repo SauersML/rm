@@ -229,7 +229,7 @@ mod performance_tests {
         String::from_utf8(buf).unwrap()
     }
 
-    /// Creates files in `dir` using a minimal naming scheme (short names), for example "0", "1", "2", etc.
+    /// Creates files in `dir` using short names (e.g. "0", "1", "2", ...).
     fn create_short_test_files(dir: &Path, count: usize, size_kb: usize) -> Vec<PathBuf> {
         let mut paths = Vec::with_capacity(count);
         for i in 0..count {
@@ -243,7 +243,7 @@ mod performance_tests {
     }
 
     /// Runs our Rust deletion routine for files matching `pattern` and returns the elapsed time (in seconds).
-    /// After deletion, only regular files (not directories) are checked.
+    /// After deletion, only files matching the pattern are checked.
     fn measure_rust_deletion(pattern: &str) -> f64 {
         let start = Instant::now();
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
@@ -254,7 +254,7 @@ mod performance_tests {
             panic!("Error in Rust deletion: {}", e);
         }
 
-        // Only count leftover files (ignore directories)
+        // Only count leftover files that match the pattern.
         let remaining: Vec<_> = glob::glob(pattern)
             .unwrap()
             .filter_map(Result::ok)
@@ -266,20 +266,21 @@ mod performance_tests {
         elapsed
     }
 
-    /// Runs the system deletion command to remove files matching `pattern` and returns the elapsed time (in seconds).
-    ///
-    /// If `use_find` is true, the deletion is done via a `find` command (which avoids shell glob expansion) to work around the ARG_MAX limit.
-    fn measure_rm_deletion(pattern: &str, use_find: bool) -> f64 {
+    /// Runs the system deletion command to remove files matching `pattern` and returns a tuple:
+    /// (elapsed time in seconds, the actual command that was executed).
+    /// If `use_find` is true, deletion is performed using the `find` command.
+    fn measure_rm_deletion(pattern: &str, use_find: bool) -> (f64, String) {
         let start = Instant::now();
         let elapsed: f64;
+        let cmd: String;
         if use_find {
-            // Extract the directory from the pattern.
             let dir = Path::new(pattern)
                 .parent()
                 .expect("Could not determine parent directory")
                 .to_string_lossy()
                 .to_string();
-            let cmd = format!("find {} -maxdepth 1 -type f -delete", dir);
+            cmd = format!("find {} -maxdepth 1 -type f -delete", dir);
+            println!("Executing system deletion command: {}", cmd);
             let output = Command::new("sh")
                 .arg("-c")
                 .arg(&cmd)
@@ -293,8 +294,8 @@ mod performance_tests {
             }
             elapsed = start.elapsed().as_secs_f64();
         } else {
-            // Use the shell with rm; this works if the expanded argument list is small enough.
-            let cmd = format!("rm -f {}", pattern);
+            cmd = format!("rm -f {}", pattern);
+            println!("Executing system deletion command: {}", cmd);
             let output = Command::new("sh")
                 .arg("-c")
                 .arg(&cmd)
@@ -309,16 +310,16 @@ mod performance_tests {
             elapsed = start.elapsed().as_secs_f64();
         }
 
-        // Verify that no matching regular files remain.
+        // Verify that no matching files remain.
         let remaining: Vec<_> = glob::glob(pattern)
             .unwrap()
             .filter_map(Result::ok)
             .filter(|p| p.is_file())
             .collect();
         if !remaining.is_empty() {
-            panic!("rm deletion failed: {} files remain", remaining.len());
+            panic!("System deletion failed: {} files remain", remaining.len());
         }
-        elapsed
+        (elapsed, cmd)
     }
 
     /// Formats a duration in seconds to a human-friendly string (ms if < 1 second).
@@ -333,18 +334,14 @@ mod performance_tests {
     /// Structure to hold benchmark results for one test scenario.
     struct BenchmarkResult {
         test_name: String,
-        file_count: usize,
-        file_size_kb: usize,
         rust_time: f64,
         rm_time: f64,
+        system_command: String,
     }
 
     /// Runs a benchmark scenario by creating files, measuring both Rust and system deletion times,
-    /// and returning the results.
-    ///
-    /// The parameter `use_short_names` determines which naming scheme to use, and
-    /// `use_find_for_rm` selects whether to use the `find` command (to avoid the ARG_MAX limit)
-    /// for the rm deletion test.
+    /// and returning the results. The parameter `use_short_names` determines which naming scheme to use,
+    /// and `use_find_for_rm` selects whether to use the `find` command for the system deletion test.
     fn run_benchmark(
         test_name: &str,
         file_count: usize,
@@ -358,7 +355,6 @@ mod performance_tests {
         // Choose creation function and glob pattern.
         let (pattern_str, create_files_fn): (String, fn(&Path, usize, usize) -> Vec<PathBuf>) =
             if use_short_names {
-                // Pattern for short-named files: files matching only digits and letters.
                 let pattern = base_path.join("[0-9a-z]*");
                 (pattern.to_string_lossy().to_string(), create_short_test_files)
             } else {
@@ -378,18 +374,17 @@ mod performance_tests {
         let rust_time = measure_rust_deletion(&pattern_str);
         println!("Rust deletion completed in {}", format_duration(rust_time));
 
-        // Recreate files for the rm deletion test.
+        // Recreate files for the system deletion test.
         create_files_fn(&base_path, file_count, file_size_kb);
         println!("Running system deletion (rm or find)...");
-        let rm_time = measure_rm_deletion(&pattern_str, use_find_for_rm);
+        let (rm_time, system_command) = measure_rm_deletion(&pattern_str, use_find_for_rm);
         println!("System deletion completed in {}", format_duration(rm_time));
 
         BenchmarkResult {
             test_name: test_name.to_string(),
-            file_count,
-            file_size_kb,
             rust_time,
             rm_time,
+            system_command,
         }
     }
 
@@ -399,9 +394,10 @@ mod performance_tests {
         println!("\n===== Starting Performance Benchmarks =====");
 
         let mut results = Vec::new();
-        // Small test: 10 files, normal names, rm works directly.
+        // Existing benchmarks:
+        results.push(run_benchmark("One file (1 x 10 KB)", 10, 10, false, false));
         results.push(run_benchmark("Small files (10 x 1 KB)", 10, 1, false, false));
-        // High-count test: 300,000 files with short names; use find for deletion to avoid ARG_MAX.
+        results.push(run_benchmark("Some small files (20000 x 1 KB)", 20000, 1, false, false));
         results.push(run_benchmark(
             "Many small files (300,000 x 1 KB)",
             300_000,
@@ -409,29 +405,31 @@ mod performance_tests {
             true,
             true,
         ));
-        // Large files test: 100 files, normal names.
         results.push(run_benchmark("Large files (100 x 10 MB)", 100, 10240, false, false));
+        results.push(run_benchmark("Medium files (50 x 100 KB)", 50, 100, false, false));
+        results.push(run_benchmark("Huge files (10 x 50 MB)", 10, 51200, false, false));
 
         println!("\n===== Performance Summary =====\n");
         println!(
-            "{:<45} | {:>10} | {:>10} | {:>10} | {:>10}",
-            "Test Scenario", "Rust", "System", "Diff", "Winner"
+            "{:<40} | {:>10} | {:>10} | {:>10} | {:<30}",
+            "Test Scenario", "Rust", "System", "Diff", "System Command"
         );
-        println!("{}", "-".repeat(95));
+        println!("{}", "-".repeat(110));
 
         for res in results {
             let diff = (res.rust_time - res.rm_time).abs();
             let winner = if res.rust_time < res.rm_time { "Rust" } else { "System" };
             println!(
-                "{:<45} | {:>10} | {:>10} | {:>10} | {:>10}",
+                "{:<40} | {:>10} | {:>10} | {:>10} | {:<30}",
                 res.test_name,
                 format_duration(res.rust_time),
                 format_duration(res.rm_time),
                 format_duration(diff),
-                winner
+                res.system_command
             );
+            println!("Winner: {}\n", winner);
         }
-        println!("{}", "-".repeat(95));
+        println!("{}", "-".repeat(110));
         println!("Note: Times are measured in seconds (or ms if < 1 second).");
     }
 
@@ -475,7 +473,73 @@ mod performance_tests {
         assert!(dir_path.is_dir(), "Directory was deleted!");
         assert!(!file_path.exists(), "File was not deleted!");
     }
+
+    /// Test when the deletion pattern only matches some of the files in the directory.
+    /// Matching files should be deleted while non-matching files remain. Non-matching files are cleaned up after timing.
+    #[test]
+    fn test_partial_match_deletion() {
+        println!("\n--- Test: Partial Pattern Deletion ---");
+        let tmp = tempdir().unwrap();
+        let base = tmp.path();
+
+        // Create files that match the pattern.
+        let matching_files: Vec<PathBuf> = (0..5)
+            .map(|i| {
+                let path = base.join(format!("match_{}.dat", i));
+                let mut f = File::create(&path).unwrap();
+                f.write_all(b"test").unwrap();
+                path
+            })
+            .collect();
+
+        // Create files that do NOT match the deletion pattern.
+        let non_matching_files: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let path = base.join(format!("nomatch_{}.dat", i));
+                let mut f = File::create(&path).unwrap();
+                f.write_all(b"test").unwrap();
+                path
+            })
+            .collect();
+
+        // Use a pattern that only matches the 'match_' files.
+        let pattern = base.join("match_*.dat");
+        let pattern_str = pattern.to_string_lossy().to_string();
+
+        println!("Running Rust deletion on partial match pattern...");
+        let rust_time = measure_rust_deletion(&pattern_str);
+        println!(
+            "Rust deletion (partial match) completed in {}.",
+            format_duration(rust_time)
+        );
+
+        // Verify that matching files have been deleted.
+        for path in matching_files {
+            assert!(
+                !path.exists(),
+                "Matching file {} was not deleted",
+                path.display()
+            );
+        }
+
+        // Verify that non-matching files still exist, then clean them up.
+        for path in non_matching_files {
+            assert!(
+                path.exists(),
+                "Non-matching file {} was mistakenly deleted",
+                path.display()
+            );
+            fs::remove_file(&path).unwrap();
+        }
+    }
 }
+
+
+
+
+
+
+
 
 #[cfg(test)]
 mod empirical_tests {
