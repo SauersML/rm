@@ -45,9 +45,9 @@ fn compute_optimal_concurrency(num_files: usize) -> usize {
     // Compute the optimal concurrency using the cached N_CPUS_F.
     let optimal_concurrency = (1.6063 + 0.6350 * N_CPUS_F.ln() - 0.0909 * (num_files_f + 1.0).ln()).exp();
 
-    // Round the result and clamp it between 1 and the number of CPU cores.
+    // Round the result
     let candidate = optimal_concurrency.round() as usize;
-    candidate.clamp(1, *N_CPUS)
+    return candidate;
 }
 
 /// Main async entry point
