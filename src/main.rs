@@ -18,19 +18,8 @@ use lazy_static::lazy_static;
 use progression::{Bar, Config};
 
 /// Delete a single file via a direct `unlink` (libc) call.
-
-/// The `libc::unlink` function is a blocking system call.  In an asynchronous environment like Tokio,
-/// executing blocking operations directly on the main async runtime threads is highly detrimental to performance.
-/// Blocking a runtime thread will prevent it from processing other asynchronous tasks, potentially leading to
-/// thread starvation, increased latency, and reduced overall throughput of the application.
-///
-/// To mitigate this, we utilize `tokio::task::spawn_blocking`. This function offloads the execution of
-/// the provided closure (which contains the `unlink` call) to a dedicated thread pool managed by Tokio,
-/// separate from the core async runtime's worker threads.
-///
-/// By using `spawn_blocking`, we ensure that the blocking `unlink` operation does not impede the progress of
-/// other asynchronous tasks running on the main Tokio runtime.  This is crucial for maintaining responsiveness
-/// and maximizing the efficiency of concurrent file deletions in an async context.
+/// The `for_each_concurrent` function, combined with the `async` block,
+/// implicitly handles offloading this blocking operation to a thread pool.
 fn unlink_file(path: &Path) -> io::Result<()> {
     let c_str = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Path contains null byte"))?;
@@ -49,7 +38,7 @@ lazy_static! {
     static ref N_CPUS_F: f64 = *N_CPUS as f64;
 }
 
-/// Compute the optimal concurrency level.
+/// Compute the optimal concurrency level
 /// Model: optimal concurrency = e^((1.6063) + (0.6350 * log(CPUs)) - (0.0909 * log((NumFiles + 1))))
 fn compute_optimal_concurrency(num_files: usize) -> usize {
     let num_files_f = num_files as f64;
@@ -62,7 +51,7 @@ fn compute_optimal_concurrency(num_files: usize) -> usize {
     candidate.clamp(1, *N_CPUS)
 }
 
-/// Main async entry point.
+/// Main async entry point
 async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io::Result<()> {
     // Gather files
     let mut files = Vec::new();
