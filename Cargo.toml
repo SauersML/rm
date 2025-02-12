@@ -29,3 +29,4 @@ argmin-math   = { version = "0.4.0", features = ["ndarray_latest"] }
 [dev-dependencies]
 rayon = "1.10.0"
 walkdir = "2.5.0"
+scandir = "2.9.2"
