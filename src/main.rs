@@ -965,4 +965,325 @@ mod test_grid {
     }
 }
 
+
+
+
+// cargo test --release -- --nocapture test_grid
+#[cfg(test)]
+mod file_count_tests {
+    use std::ffi::{CStr, CString};
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    use tempfile::tempdir;
+    use walkdir::WalkDir;
+    use rayon::prelude::*;
+    use libc;
+
+    // This helper is used by the scandir-based method.
+    // It returns 1 if the entry is a regular file and not "." or "..".
+    unsafe extern "C" fn file_filter(entry: *const libc::dirent) -> libc::c_int {
+        if entry.is_null() {
+            return 0;
+        }
+        let d_name_ptr = (*entry).d_name.as_ptr();
+        if d_name_ptr.is_null() {
+            return 0;
+        }
+        let name = CStr::from_ptr(d_name_ptr);
+        let bytes = name.to_bytes();
+        if bytes == b"." || bytes == b".." {
+            return 0;
+        }
+        if (*entry).d_type == libc::DT_REG {
+            return 1;
+        }
+        0
+    }
+
+    // Uses std::fs::read_dir without any extra filtering.
+    fn count_using_read_dir(path: &Path) -> (usize, Duration) {
+        let start = Instant::now();
+        let count = fs::read_dir(path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .count();
+        (count, start.elapsed())
+    }
+
+    // Uses std::fs::read_dir with an explicit filter checking the file type.
+    fn count_using_read_dir_with_filter(path: &Path) -> (usize, Duration) {
+        let start = Instant::now();
+        let count = fs::read_dir(path)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_type()
+                    .map(|ft| ft.is_file())
+                    .unwrap_or(false)
+            })
+            .count();
+        (count, start.elapsed())
+    }
+
+    // Uses the WalkDir crate (restricted to a depth of 1).
+    fn count_using_walkdir(path: &Path) -> (usize, Duration) {
+        let start = Instant::now();
+        let count = WalkDir::new(path)
+            .max_depth(1)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|entry| entry.file_type().is_file())
+            .count();
+        (count, start.elapsed())
+    }
+
+    // Uses Rayon to perform parallel iteration over the entries.
+    fn count_using_rayon(path: &Path) -> (usize, Duration) {
+        let start = Instant::now();
+        let count = fs::read_dir(path)
+            .unwrap()
+            .par_bridge()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_type()
+                    .map(|ft| ft.is_file())
+                    .unwrap_or(false)
+            })
+            .count();
+        (count, start.elapsed())
+    }
+
+    // Uses direct libc calls: opendir() and readdir().
+    fn count_using_opendir_readdir(path: &Path) -> (usize, Duration) {
+        let start = Instant::now();
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        unsafe {
+            let dirp = libc::opendir(c_path.as_ptr());
+            if dirp.is_null() {
+                panic!("opendir failed");
+            }
+            let mut count = 0;
+            loop {
+                let entry = libc::readdir(dirp);
+                if entry.is_null() {
+                    break;
+                }
+                let name_ptr = (*entry).d_name.as_ptr();
+                if name_ptr.is_null() {
+                    continue;
+                }
+                let name = CStr::from_ptr(name_ptr).to_string_lossy();
+                if name == "." || name == ".." {
+                    continue;
+                }
+                if (*entry).d_type == libc::DT_REG {
+                    count += 1;
+                }
+            }
+            libc::closedir(dirp);
+            (count, start.elapsed())
+        }
+    }
+
+    // Uses libc's scandir() function.
+    fn count_using_scandir(path: &Path) -> (usize, Duration) {
+        let start = Instant::now();
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        unsafe {
+            let mut namelist: *mut *mut libc::dirent = std::ptr::null_mut();
+            let count = libc::scandir(c_path.as_ptr(), &mut namelist, Some(file_filter), None);
+            if count < 0 {
+                panic!("scandir failed");
+            }
+            for i in 0..count {
+                let entry = *namelist.add(i as usize);
+                libc::free(entry as *mut libc::c_void);
+            }
+            libc::free(namelist as *mut libc::c_void);
+            (count as usize, start.elapsed())
+        }
+    }
+
+    // Uses the raw getdents64 syscall.
+    fn count_using_getdents64(path: &Path) -> (usize, Duration) {
+        let start = Instant::now();
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        unsafe {
+            let fd = libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+            if fd < 0 {
+                panic!("Failed to open directory");
+            }
+            let buf_size = 8192;
+            let mut buf = vec![0u8; buf_size];
+            let mut count = 0;
+            loop {
+                let nread = libc::syscall(
+                    libc::SYS_getdents64,
+                    fd,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf_size,
+                );
+                if nread == -1 {
+                    libc::close(fd);
+                    panic!("getdents64 failed");
+                }
+                if nread == 0 {
+                    break;
+                }
+                let mut bpos = 0;
+                while bpos < nread as usize {
+                    let d = buf.as_ptr().add(bpos) as *const libc::dirent64;
+                    let reclen = (*d).d_reclen as usize;
+                    let name_ptr = (*d).d_name.as_ptr();
+                    let name = CStr::from_ptr(name_ptr);
+                    if name.to_bytes() != b"." && name.to_bytes() != b".." {
+                        if (*d).d_type == libc::DT_REG {
+                            count += 1;
+                        }
+                    }
+                    bpos += reclen;
+                }
+            }
+            libc::close(fd);
+            (count, start.elapsed())
+        }
+    }
+
+    // Uses an external shell command that glob-expands using Bash.
+    fn count_using_external_glob(path: &Path) -> (usize, Duration) {
+        let start = Instant::now();
+        // This command uses: files=(./*); echo "${#files[@]}"
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("files=(./*); echo \"${#files[@]}\"")
+            .current_dir(path)
+            .output()
+            .expect("Failed to execute external glob command");
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        let count = output_str.trim().parse::<usize>().unwrap_or(0);
+        (count, start.elapsed())
+    }
+
+    // Uses an external shell command that first enables nullglob.
+    fn count_using_external_nullglob(path: &Path) -> (usize, Duration) {
+        let start = Instant::now();
+        // This command uses: shopt -s nullglob; files=(*); echo "${#files[@]}"
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("shopt -s nullglob; files=(*); echo \"${#files[@]}\"")
+            .current_dir(path)
+            .output()
+            .expect("Failed to execute external nullglob command");
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        let count = output_str.trim().parse::<usize>().unwrap_or(0);
+        (count, start.elapsed())
+    }
+
+    // Uses statistical estimation based on directory metadata.
+    // Because directory metadata size may not scale exactly with entry count,
+    // we allow a 5% error margin.
+    fn count_using_statistical_estimation(path: &Path) -> (usize, Duration) {
+        let start = Instant::now();
+        // Do a quick full scan to compute an average file-name length.
+        let entries: Vec<_> = fs::read_dir(path).unwrap().filter_map(Result::ok).collect();
+        let precise_count = entries.len();
+        let total_name_length: usize = entries
+            .iter()
+            .map(|entry| entry.file_name().to_string_lossy().len())
+            .sum();
+        let average_entry_size = if precise_count > 0 {
+            total_name_length as f64 / precise_count as f64
+        } else {
+            0.0
+        };
+        let dir_meta = fs::metadata(path).unwrap();
+        let dir_size = dir_meta.len() as f64;
+        let estimated_count = if average_entry_size > 0.0 {
+            (dir_size / average_entry_size).round() as usize
+        } else {
+            0
+        };
+        (estimated_count, start.elapsed())
+    }
+
+    #[test]
+    fn test_file_count_methods() {
+        // Create a temporary directory.
+        let tmp_dir = tempdir().unwrap();
+        let dir_path = tmp_dir.path();
+
+        // Create 10,000 files.
+        let num_files = 10_000;
+        for i in 0..num_files {
+            let file_path = dir_path.join(format!("file_{}.dat", i));
+            let mut file = File::create(file_path).unwrap();
+            // Write minimal content.
+            writeln!(file, "test").unwrap();
+        }
+
+        // Run each counting method, record its count and elapsed time.
+        let mut results = Vec::new();
+
+        let (c, t) = count_using_read_dir(dir_path);
+        results.push(("std::fs::read_dir (unfiltered)", c, t));
+
+        let (c, t) = count_using_read_dir_with_filter(dir_path);
+        results.push(("std::fs::read_dir (with file_type filter)", c, t));
+
+        let (c, t) = count_using_walkdir(dir_path);
+        results.push(("WalkDir crate", c, t));
+
+        let (c, t) = count_using_rayon(dir_path);
+        results.push(("Rayon parallel iteration", c, t));
+
+        let (c, t) = count_using_opendir_readdir(dir_path);
+        results.push(("libc opendir/readdir", c, t));
+
+        let (c, t) = count_using_scandir(dir_path);
+        results.push(("libc scandir", c, t));
+
+        let (c, t) = count_using_getdents64(dir_path);
+        results.push(("Raw getdents64 syscall", c, t));
+
+        let (c, t) = count_using_external_glob(dir_path);
+        results.push(("External command (bash glob)", c, t));
+
+        let (c, t) = count_using_external_nullglob(dir_path);
+        results.push(("External command (nullglob)", c, t));
+
+        let (c, t) = count_using_statistical_estimation(dir_path);
+        results.push(("Statistical estimation", c, t));
+
+        println!("File counting results (expected count: {}):", num_files);
+        for (desc, count, duration) in results {
+            println!(
+                "{} -> Count: {}, Time: {:?} ({} µs)",
+                desc,
+                count,
+                duration,
+                duration.as_micros()
+            );
+            if desc == "Statistical estimation" {
+                let diff = if count > num_files { count - num_files } else { num_files - count };
+                assert!(
+                    (diff as f64) / (num_files as f64) < 0.05,
+                    "{} estimation not within 5% of expected count",
+                    desc
+                );
+            } else {
+                assert_eq!(
+                    count, num_files,
+                    "{} did not count {} files correctly",
+                    desc, num_files
+                );
+            }
+        }
+    }
+}
+
 // cargo test --release -- --nocapture
