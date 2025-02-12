@@ -1385,4 +1385,239 @@ mod file_count_tests {
     }
 }
 
+// cargo test --release -- --nocapture glob_tests
+#[cfg(test)]
+mod glob_tests {
+    use glob::{glob, glob_with, MatchOptions};
+    use globset::{Glob, GlobBuilder, GlobSetBuilder};
+    use std::fs::{self, File};
+    use std::io;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    const NUM_FILES: usize = 50_000;
+    const MATCH_PATTERN: &str = "testmatch*.txt";
+    const TEMP_DIR_PREFIX: &str = "glob_perf_test";
+
+    // Helper function to create temporary files.
+    fn create_temp_files(dir: &Path) -> io::Result<()> {
+        for i in 0..NUM_FILES {
+            let file_name = if i % 2 == 0 {
+                format!("testmatch{}.txt", i)
+            } else {
+                format!("nomatch{}.txt", i)
+            };
+            let file_path = dir.join(file_name);
+            File::create(file_path)?;
+        }
+        Ok(())
+    }
+
+    // Helper function to measure and print duration.
+    fn measure_duration(start: Instant, test_name: &str) -> Duration {
+        let duration = start.elapsed();
+        println!("{}: {:?}", test_name, duration);
+        duration
+    }
+
+    #[test]
+    fn performance_comparison() -> io::Result<()> {
+        // Create a temporary directory.  Use a RAII guard
+        let temp_dir = tempfile::Builder::new()
+            .prefix(TEMP_DIR_PREFIX)
+            .tempdir()?;
+        let dir_path = temp_dir.path();
+
+        create_temp_files(dir_path)?;
+
+        // --- glob crate test ---
+        let start_glob = Instant::now();
+        let mut glob_count = 0;
+        let glob_pattern = dir_path.join(MATCH_PATTERN).to_string_lossy().to_string();
+        for entry in glob(&glob_pattern).expect("Failed to read glob pattern") {
+            if let Ok(_path) = entry {
+                glob_count += 1;
+            }
+        }
+        let duration_glob = measure_duration(start_glob, "glob crate");
+
+        // --- globset crate test ---
+        let start_globset = Instant::now();
+        let mut globset_count = 0;
+        let mut builder = GlobSetBuilder::new();
+        let compiled_glob = Glob::new(MATCH_PATTERN)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        builder.add(compiled_glob);
+        let set = builder.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        for entry in fs::read_dir(dir_path)? {
+            let entry = entry?;
+            if set.is_match(entry.file_name()) {
+                globset_count += 1;
+            }
+        }
+        let duration_globset = measure_duration(start_globset, "globset crate");
+
+        // --- globset crate test (with Path) ---
+        let start_globset_path = Instant::now();
+        let mut globset_path_count = 0;
+        let mut builder_path = GlobSetBuilder::new();
+        let compiled_glob_path = Glob::new(MATCH_PATTERN)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        builder_path.add(compiled_glob_path);
+        let set_path = builder_path.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        for entry in fs::read_dir(dir_path)? {
+            let entry = entry?;
+            if set_path.is_match(&dir_path.join(entry.file_name())) {
+                globset_path_count += 1;
+            }
+        }
+        let duration_globset_path = measure_duration(start_globset_path, "globset crate (with Path)");
+
+        assert_eq!(
+            glob_count,
+            NUM_FILES / 2,
+            "glob crate matched incorrect number of files"
+        );
+        assert_eq!(
+            globset_count,
+            NUM_FILES / 2,
+            "globset crate matched incorrect number of files"
+        );
+        assert_eq!(
+            globset_path_count,
+            NUM_FILES / 2,
+            "globset crate (with Path) matched incorrect number of files"
+        );
+
+        if duration_glob < duration_globset {
+            println!("glob crate was faster");
+        } else if duration_globset < duration_glob {
+            println!("globset crate was faster");
+        } else {
+            println!("glob and globset were equally fast");
+        }
+
+        if duration_glob < duration_globset_path {
+            println!("glob crate was faster than globset (with Path)");
+        } else if duration_globset_path < duration_glob {
+            println!("globset crate (with Path) was faster");
+        } else {
+            println!("glob and globset (with Path) were equally fast");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn performance_comparison_case_insensitive() -> io::Result<()> {
+        let temp_dir = tempfile::Builder::new()
+            .prefix(TEMP_DIR_PREFIX)
+            .tempdir()?;
+        let dir_path = temp_dir.path();
+
+        // Create files using uppercase names.
+        for i in 0..NUM_FILES {
+            let file_name = if i % 2 == 0 {
+                format!("TESTMATCH{}.TXT", i)
+            } else {
+                format!("NOMATCH{}.TXT", i)
+            };
+            let file_path = dir_path.join(file_name);
+            File::create(file_path)?;
+        }
+
+        // --- glob crate test (case-insensitive) ---
+        let start_glob = Instant::now();
+        let mut glob_count = 0;
+        let glob_pattern = dir_path.join(MATCH_PATTERN).to_string_lossy().to_string();
+        let options = MatchOptions {
+            case_sensitive: false,
+            require_literal_separator: false,
+            require_literal_leading_dot: false,
+        };
+        for entry in glob_with(&glob_pattern, options).expect("Failed to read glob pattern") {
+            if let Ok(_path) = entry {
+                glob_count += 1;
+            }
+        }
+        let duration_glob = measure_duration(start_glob, "glob crate (case-insensitive)");
+
+        // --- globset crate test (case-insensitive) ---
+        let start_globset = Instant::now();
+        let mut globset_count = 0;
+        let mut builder = GlobSetBuilder::new();
+        // Use GlobBuilder for case-insensitive matching.
+        let compiled_glob = GlobBuilder::new(MATCH_PATTERN)
+            .case_insensitive(true)
+            .build()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        builder.add(compiled_glob);
+        let set = builder.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        for entry in fs::read_dir(dir_path)? {
+            let entry = entry?;
+            if set.is_match(entry.file_name()) {
+                globset_count += 1;
+            }
+        }
+        let duration_globset = measure_duration(start_globset, "globset crate (case-insensitive)");
+
+        // --- globset crate test (case-insensitive with Path) ---
+        let start_globset_path = Instant::now();
+        let mut globset_path_count = 0;
+        let mut builder_path = GlobSetBuilder::new();
+        let compiled_glob_path = GlobBuilder::new(MATCH_PATTERN)
+            .case_insensitive(true)
+            .build()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        builder_path.add(compiled_glob_path);
+        let set_path = builder_path.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        for entry in fs::read_dir(dir_path)? {
+            let entry = entry?;
+            if set_path.is_match(&dir_path.join(entry.file_name())) {
+                globset_path_count += 1;
+            }
+        }
+        let duration_globset_path = measure_duration(
+            start_globset_path,
+            "globset crate (case-insensitive with Path)",
+        );
+
+        assert_eq!(
+            glob_count,
+            NUM_FILES / 2,
+            "glob crate matched incorrect number of files"
+        );
+        assert_eq!(
+            globset_count,
+            NUM_FILES / 2,
+            "globset crate matched incorrect number of files"
+        );
+        assert_eq!(
+            globset_path_count,
+            NUM_FILES / 2,
+            "globset crate (with Path) matched incorrect number of files"
+        );
+
+        if duration_glob < duration_globset {
+            println!("glob crate was faster (case-insensitive)");
+        } else if duration_globset < duration_glob {
+            println!("globset crate was faster (case-insensitive)");
+        } else {
+            println!("glob and globset were equally fast (case-insensitive)");
+        }
+
+        if duration_glob < duration_globset_path {
+            println!("glob crate was faster than globset (with Path, case-insensitive)");
+        } else if duration_globset_path < duration_glob {
+            println!("globset crate (with Path) was faster (case-insensitive)");
+        } else {
+            println!("glob and globset (with Path) were equally fast (case-insensitive)");
+        }
+
+        Ok(())
+    }
+}
+
 // cargo test --release -- --nocapture
