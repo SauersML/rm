@@ -223,7 +223,6 @@ mod performance_tests {
         time::Instant,
     };
     use tempfile::tempdir;
-    use glob::glob;
     use tokio::runtime::Builder;
 
     /// Creates files in `dir` using the standard naming scheme (e.g. "test_file_0.dat").
