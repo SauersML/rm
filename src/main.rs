@@ -138,7 +138,7 @@ async fn run_deletion_tokio(pattern: &str, concurrency_override: Option<usize>) 
 
     // Create shared state for counting deletions.
     let completed_counter = Arc::new(AtomicUsize::new(0));
-    const BATCH_SIZE: usize = 5000;
+    const BATCH_SIZE: usize = 120;
 
     // Convert the matched files into a stream, then delete concurrently.
     let file_stream = futures::stream::iter(matched_files.into_iter());
@@ -209,7 +209,7 @@ fn compute_optimal_concurrency(num_files: usize) -> usize {
     candidate
 }
 
-
+// Batch Size and Thread Pool Size
 fn run_deletion_rayon(pattern: &str, concurrency_override: Option<usize>) -> io::Result<()> {
     let (dir_path, file_pattern) = pattern.rsplit_once('/').unwrap_or((".", pattern));
     let dir = Path::new(dir_path);
