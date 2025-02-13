@@ -604,6 +604,206 @@ mod shell_performance {
     }
 }
 
+// cargo test --release -- --nocapture t_r_performance
+#[cfg(test)]
+mod t_r_performance {
+    use glob::glob;
+    use std::{
+        fs::{self, File},
+        io::Write,
+        path::{Path, PathBuf},
+        process::Command,
+        thread::sleep,
+        time::{Duration, Instant},
+    };
+
+    // Number of iterations per command
+    const ITERATIONS: usize = 5;
+
+    // Base directory for test runs (make sure this exists on your system)
+    const BASE_TEST_DIR: &str = "/home/hsiehph/sauer354/tmp_test";
+
+    /// Returns filesystem info (using `df -T`) for the given directory.
+    fn get_filesystem_info(dir: &Path) -> String {
+        let output = Command::new("df")
+            .arg("-T")
+            .arg(dir)
+            .output()
+            .expect("Failed to get filesystem info");
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
+    /// Prepares a fresh test directory for a single benchmark iteration.
+    /// The directory will be created at:
+    ///   BASE_TEST_DIR/<test_name>_<command_type>_iter<iteration>
+    fn prepare_test_directory(test_name: &str, command_type: &str, iteration: usize) -> PathBuf {
+        let dir_path = Path::new(BASE_TEST_DIR)
+            .join(format!("{}_{}_iter{}", test_name, command_type, iteration));
+        // Remove the directory if it already exists
+        if dir_path.exists() {
+            fs::remove_dir_all(&dir_path)
+                .unwrap_or_else(|e| panic!("Failed to remove {}: {}", dir_path.display(), e));
+        }
+        // Create the fresh directory
+        fs::create_dir_all(&dir_path)
+            .unwrap_or_else(|e| panic!("Failed to create {}: {}", dir_path.display(), e));
+        // Report filesystem type/info for transparency
+        println!(
+            "Filesystem info for {}:\n{}",
+            dir_path.display(),
+            get_filesystem_info(&dir_path)
+        );
+        dir_path
+    }
+
+    /// Creates test files (named "test_file_0.dat", "test_file_1.dat", …)
+    /// in the given directory. Each file gets 16 zero bytes.
+    fn create_test_files(dir: &Path, count: usize) {
+        for i in 0..count {
+            let path = dir.join(format!("test_file_{}.dat", i));
+            let mut file = File::create(&path)
+                .unwrap_or_else(|e| panic!("Failed to create {}: {}", path.display(), e));
+            let content = vec![0u8; 16];
+            file.write_all(&content)
+                .unwrap_or_else(|e| panic!("Failed to write to {}: {}", path.display(), e));
+        }
+    }
+
+    /// Verifies that no files matching the given glob pattern remain.
+    /// Panics if any matching file is found.
+    fn verify_no_files(pattern: &str) {
+        let mut count = 0;
+        for entry in glob(pattern).expect("Invalid glob pattern") {
+            if let Ok(path) = entry {
+                if path.is_file() {
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            panic!("Deletion failed: {} file(s) still exist matching {}", count, pattern);
+        }
+    }
+
+    /// Runs the provided shell command (via `sh -c`) and returns the elapsed time in seconds.
+    /// Sync is executed before starting the timer and after the command completes to flush caches.
+    fn run_command(command: &str, pattern: &str) -> f64 {
+        println!("Executing: {}", command);
+        // Force pending I/O to disk before timing
+        Command::new("sync").status().expect("Failed to sync before command");
+        let start = Instant::now();
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .output()
+            .unwrap_or_else(|e| panic!("Failed to execute command `{}`: {}", command, e));
+        if !output.status.success() {
+            panic!(
+                "Command `{}` failed:\n{}",
+                command,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        // Force pending I/O to disk after command execution
+        Command::new("sync").status().expect("Failed to sync after command");
+        let elapsed = start.elapsed().as_secs_f64();
+        // Small delay to allow filesystem metadata to settle
+        sleep(Duration::from_millis(100));
+        verify_no_files(pattern);
+        elapsed
+    }
+
+    /// Calculates statistical metrics (min, max, mean, median, standard deviation) for the provided times.
+    fn calculate_stats(times: &[f64]) -> (f64, f64, f64, f64, f64) {
+        let min = times.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let sum: f64 = times.iter().sum();
+        let mean = sum / times.len() as f64;
+        let mut sorted = times.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = if sorted.len() % 2 == 0 {
+            (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
+        } else {
+            sorted[sorted.len() / 2]
+        };
+        let variance = times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / times.len() as f64;
+        let stddev = variance.sqrt();
+        (min, max, mean, median, stddev)
+    }
+
+    /// Runs a single benchmark iteration for the given command type ("tokio" or "rayon")
+    /// and returns the elapsed time in seconds.
+    fn run_single_benchmark(test_name: &str, file_count: usize, command_type: &str, iteration: usize) -> f64 {
+        // Prepare a fresh, isolated test directory
+        let dir_path = prepare_test_directory(test_name, command_type, iteration);
+        // Build the glob pattern for matching test files
+        let pattern = format!("{}/test_file_*.dat", dir_path.to_string_lossy());
+        println!("Creating {} file(s) in {}", file_count, dir_path.display());
+        create_test_files(&dir_path, file_count);
+        // Build the command for the Rust binary deletion.
+        // It uses the file glob pattern and the provided flag (--tokio or --rayon).
+        let command = format!("target/release/del \"{}\" --{}", pattern, command_type);
+        let elapsed = run_command(&command, &pattern);
+        println!(
+            "[{}] Iteration {} ({} files, {} deletion) completed in {:.3} seconds",
+            test_name,
+            iteration + 1,
+            file_count,
+            command_type,
+            elapsed
+        );
+        elapsed
+    }
+
+    /// Runs the benchmark for a given test scenario (file count).
+    /// Both the Tokio and Rayon deletion methods are run over multiple iterations,
+    /// and comprehensive statistics are reported.
+    fn run_benchmark_for_file_count(test_name: &str, file_count: usize) {
+        println!("\n===== {}: {} file(s) =====", test_name, file_count);
+        println!("Using base test directory: {}", BASE_TEST_DIR);
+
+        // Run the Tokio deletion benchmark
+        println!("--- Running Tokio Deletion_Benchmark ---");
+        let mut tokio_times = Vec::new();
+        for iter in 0..ITERATIONS {
+            tokio_times.push(run_single_benchmark(test_name, file_count, "tokio", iter));
+        }
+        let (min_tokio, max_tokio, mean_tokio, median_tokio, stddev_tokio) = calculate_stats(&tokio_times);
+        println!(
+            "[{} - Tokio] min: {:.3} s, max: {:.3} s, mean: {:.3} s, median: {:.3} s, stddev: {:.3} s",
+            test_name, min_tokio, max_tokio, mean_tokio, median_tokio, stddev_tokio
+        );
+
+        // Run the Rayon deletion benchmark
+        println!("--- Running Rayon Deletion_Benchmark ---");
+        let mut rayon_times = Vec::new();
+        for iter in 0..ITERATIONS {
+            rayon_times.push(run_single_benchmark(test_name, file_count, "rayon", iter));
+        }
+        let (min_rayon, max_rayon, mean_rayon, median_rayon, stddev_rayon) = calculate_stats(&rayon_times);
+        println!(
+            "[{} - Rayon] min: {:.3} s, max: {:.3} s, mean: {:.3} s, median: {:.3} s, stddev: {:.3} s",
+            test_name, min_rayon, max_rayon, mean_rayon, median_rayon, stddev_rayon
+        );
+    }
+
+    /// Main performance benchmark test that runs three scenarios:
+    ///   1. 1 file
+    ///   2. 100 files
+    ///   3. 25,000 files
+    ///
+    /// Each scenario runs both the Tokio and Rayon deletion methods over multiple iterations.
+    #[test]
+    fn benchmark_shell_commands() {
+        println!("=== Starting Shell Command Benchmarks ===");
+        let file_counts = [1, 100, 25_000];
+        for &count in &file_counts {
+            run_benchmark_for_file_count("Deletion_Benchmark", count);
+        }
+        println!("=== Benchmarks Complete ===");
+    }
+}
+
 
 // cargo test --release -- --nocapture performance_tests
 #[cfg(test)]
