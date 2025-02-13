@@ -269,7 +269,7 @@ fn collect_matching_files(
 
 // ====================================================================================================================================
 
-// cargo test --release -- --nocapture performance_tests
+// cargo test --release -- --nocapture shell_performance
 #[cfg(test)]
 mod shell_performance {
     use glob::glob;
