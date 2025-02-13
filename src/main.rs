@@ -1927,7 +1927,6 @@ mod collect_tests {
     fn test_nonexistent_directory() {
         let fake_dir = Path::new("/this/dir/should/not/exist");
         let matcher = build_matcher("*.txt");
-        let temp_vec = Vec::<CString>::new();
         let result = collect_matching_files(fake_dir, &matcher);
         assert!(result.is_err(), "Expected an error for a nonexistent directory");
     }
@@ -1949,7 +1948,6 @@ mod collect_tests {
         fs::set_permissions(dir, perms.clone())?;
 
         let matcher = build_matcher("*.txt");
-        let temp_vec = Vec::<CString>::new();
         let result = collect_matching_files(dir, &matcher);
         // Restore permissions so TempDir can be cleaned up.
         perms.set_mode(0o755);
