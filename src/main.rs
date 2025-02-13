@@ -17,7 +17,6 @@ use progression::{Bar, Config};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
-use nix::unistd::{close as nix_close, unlinkat};
 use globset::GlobSet;
 
 lazy_static! {
