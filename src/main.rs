@@ -116,7 +116,8 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
             let completed_counter = Arc::clone(&completed_counter_clone);
             async move {
                 // Attempt to delete the file.
-                match unlink_file(Path::new(OsStr::from_bytes(cstr.to_bytes()))) {
+                let path = Path::new(OsStr::from_bytes(cstr.to_bytes()));
+                match unlink_file(&path) {
                     Ok(_) => {
                         let done_so_far = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
                         // Update progress in batches to minimize overhead.
@@ -125,7 +126,7 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
                         }
                     }
                     Err(e) => {
-                        eprintln!("Failed to delete '{}': {}", Path::new(OsStr::from_bytes(cstr.to_bytes())).display(), e);
+                        eprintln!("Failed to delete '{}': {}", path.display(), e);
                         // In this design, we exit on the first deletion error.
                         std::process::exit(1);
                     }
