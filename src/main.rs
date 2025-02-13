@@ -1696,8 +1696,16 @@ mod collect_tests {
         collected.sort();
 
         // Build expected full paths.
-        let mut expected: Vec<PathBuf> = matching_files.iter().map(|s| dir.join(s)).collect();
+        let mut expected: Vec<CString> = matching_files.iter().map(|s| {
+            let dir_bytes = dir.as_os_str().as_bytes();
+            let mut full_path_bytes = Vec::with_capacity(dir_bytes.len() + 1 + s.len());
+            full_path_bytes.extend_from_slice(dir_bytes);
+            full_path_bytes.push(b'/');
+            full_path_bytes.extend_from_slice(s.as_bytes());
+            CString::new(full_path_bytes).unwrap()
+        }).collect();
         expected.sort();
+
 
         assert_eq!(
             collected, expected,
@@ -1751,8 +1759,22 @@ mod collect_tests {
         collect_matching_files(dir, &matcher, &mut collected)?;
         collected.sort();
 
-        let mut expected: Vec<PathBuf> =
-            vec![dir.join("file.txt"), dir.join(".hidden.txt")];
+        let mut expected: Vec<CString> = vec![
+            {
+                let mut v = Vec::new();
+                v.extend_from_slice(dir.as_os_str().as_bytes());
+                v.push(b'/');
+                v.extend_from_slice(b"file.txt");
+                CString::new(v).unwrap()
+            },
+            {
+                let mut v = Vec::new();
+                v.extend_from_slice(dir.as_os_str().as_bytes());
+                v.push(b'/');
+                v.extend_from_slice(b".hidden.txt");
+                CString::new(v).unwrap()
+            }
+        ];
         expected.sort();
 
         assert_eq!(
@@ -1778,14 +1800,11 @@ mod collect_tests {
         symlink(&target, &symlink_path)?;
 
         let matcher = build_matcher("*.txt");
-        let files = collect_matching_files(dir, &matcher)?;
-        // Only "regular.txt" should be collected.
-        assert_eq!(
-            files.len(),
-            1,
-            "Expected only one regular file to be collected (directories and symlinks should be skipped)"
-        );
-        assert_eq!(files[0], target, "Collected file is not the expected regular file");
+        let mut files = Vec::<CString>::new();
+        collect_matching_files(dir, &matcher, &mut files)?;
+        assert_eq!(files.len(), 1, "Expected only one regular file to be collected (directories and symlinks should be skipped)");
+        let target_c = CString::new(target.as_os_str().as_bytes()).unwrap();
+        assert_eq!(files[0], target_c, "Collected file is not the expected regular file");
         Ok(())
     }
 
