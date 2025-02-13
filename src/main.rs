@@ -2,36 +2,24 @@ use std::{
     env,
     ffi::CString,
     io,
-    path::{Path},
+    path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
 };
 
-use futures::{StreamExt};
+use futures::StreamExt;
 use num_cpus;
 use tokio::runtime::Builder;
 use lazy_static::lazy_static;
 use progression::{Bar, Config};
-use std::ffi::{OsStr};
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::io::RawFd;
+use nix::fcntl::AtFlags;
+use nix::unistd::{close as nix_close, unlinkat};
 use globset::GlobSet;
-
-/// Delete a single file via a direct `unlink` (libc) call.
-/// The `for_each_concurrent` function, combined with the `async` block,
-/// implicitly handles offloading this blocking operation to a thread pool.
-fn unlink_file(path: &Path) -> io::Result<()> {
-    let c_str = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Path contains null byte"))?;
-
-    let ret = unsafe { libc::unlink(c_str.as_ptr()) };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
 
 lazy_static! {
     // Cache the number of CPUs and its f64 conversion as a static variable.
@@ -44,45 +32,50 @@ lazy_static! {
 fn compute_optimal_concurrency(num_files: usize) -> usize {
     let num_files_f = num_files as f64;
 
-    // Compute the optimal concurrency using the cached N_CPUS_F.
-    let optimal_concurrency = (1.6063 + 0.6350 * N_CPUS_F.ln() - 0.0909 * (num_files_f + 1.0).ln()).exp();
+    // Compute the optimal concurrency using the cached N_CPUS_F
+    let optimal_concurrency =
+        (1.6063 + 0.6350 * N_CPUS_F.ln() - 0.0909 * (num_files_f + 1.0).ln()).exp();
 
     // Round the result
     let candidate = optimal_concurrency.round() as usize;
-    return candidate;
+    candidate
 }
 
-/// Main async entry point.
-/// Performs a single-pass collection of matching files (using collect_matching_files),
-/// then deletes them concurrently with a progress bar.
+/// Main async entry point
+/// Performs a single-pass collection of matching files (using `collect_matching_files`),
+/// then deletes them concurrently with a progress bar
 async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io::Result<()> {
-    // Split the pattern into directory & filename parts.
+    // Split the pattern into directory & filename parts
     let (dir_path, file_pattern) = pattern.rsplit_once('/').unwrap_or((".", pattern));
     let dir = Path::new(dir_path);
 
-    // Canonicalize the directory for safety.
+    // Canonicalize the directory for safety
     let canonical_dir = std::fs::canonicalize(dir)?;
 
-    // Build a globset matcher from the filename pattern.
+    // Build a globset matcher from the filename pattern
     let mut gs_builder = globset::GlobSetBuilder::new();
     gs_builder.add(
-        globset::Glob::new(file_pattern)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid glob pattern: {}", e)))?
+        globset::Glob::new(file_pattern).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid glob pattern: {}", e))
+        })?,
     );
-    let glob_set = gs_builder
-        .build()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e)))?;
+    let glob_set = gs_builder.build().map_err(|e| {
+        io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e))
+    })?;
 
-    // Collect all matching files in a single pass using the fast getdents64 approach.
-    let mut matched_files = Vec::<CString>::new();
-    collect_matching_files(&canonical_dir, &glob_set, &mut matched_files)?;
+    // Collect all matching filenames (base names only) and keep the directory open
+    let (fd, matched_files) = collect_matching_files(&canonical_dir, &glob_set)?;
     let total_files = matched_files.len();
     if total_files == 0 {
         println!("No matching files found for pattern '{}'.", pattern);
+        // Close the directory FD if no matches
+        unsafe {
+            libc::close(fd);
+        }
         return Ok(());
     }
 
-    // Compute concurrency (unless an override is given).
+    // Compute concurrency (unless an override is given)
     let concurrency = match concurrency_override {
         Some(n) => n,
         None => compute_optimal_concurrency(total_files),
@@ -94,7 +87,7 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
         num_cpus::get()
     );
 
-    // Set up a progress bar.
+    // Set up a progress bar
     let config = Config {
         throttle_millis: 250,
         ..Default::default()
@@ -111,23 +104,34 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
     let completed_counter_clone = Arc::clone(&completed_counter);
 
     file_stream
-        .for_each_concurrent(Some(concurrency), move |cstr| {
+        .for_each_concurrent(Some(concurrency), move |filename_cstr| {
             let pb = Arc::clone(&pb_clone);
             let completed_counter = Arc::clone(&completed_counter_clone);
             async move {
-                // Attempt to delete the file.
-                let path = Path::new(OsStr::from_bytes(cstr.to_bytes()));
-                match unlink_file(&path) {
+                // Attempt to delete the file using `unlinkat`
+                // Note: The `filename_cstr` is just the base name; we rely on `AT_EMPTY_PATH`
+                // We also wrap the FD in Some(...) so `unlinkat` references that directory
+                let result = unlinkat(
+                    Some(nix::dir::DirFd(fd)),
+                    filename_cstr.as_c_str(),
+                    AtFlags::AT_EMPTY_PATH,
+                );
+
+                match result {
                     Ok(_) => {
                         let done_so_far = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                        // Update progress in batches to minimize overhead.
+                        // Update progress in batches to minimize overhead
                         if done_so_far % BATCH_SIZE == 0 {
                             pb.inc(BATCH_SIZE as u64);
                         }
                     }
                     Err(e) => {
-                        eprintln!("Failed to delete '{}': {}", path.display(), e);
-                        // In this design, we exit on the first deletion error.
+                        eprintln!(
+                            "Failed to delete '{}': {}",
+                            filename_cstr.to_string_lossy(),
+                            e
+                        );
+                        // Exit on the first deletion error
                         std::process::exit(1);
                     }
                 }
@@ -135,7 +139,7 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
         })
         .await;
 
-    // Finalize the progress bar for any leftover increments in the last batch.
+    // Finalize the progress bar for any leftover increments in the last batch
     let remainder = completed_counter.load(Ordering::Relaxed) % BATCH_SIZE;
     if remainder > 0 {
         pb.inc(remainder as u64);
@@ -148,6 +152,9 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
         }
         Err(_) => {}
     }
+
+    // Close the directory file descriptor.
+    let _ = nix_close(fd);
 
     Ok(())
 }
@@ -179,30 +186,40 @@ fn main() {
     }
 }
 
-
-/// Collects all matching file paths in the given directory using a fast,
-/// getdents64-based approach. Only regular files (and not "." or "..")
-/// are considered, and each file’s name is filtered using the provided globset matcher.
+/// Collects matching *filenames* in the given directory using a fast,
+/// `getdents64`-based approach, then returns `(fd, Vec<CString>)`.
+/// We do not build full paths; we just store the base names of regular files
+/// that match the provided globset. The directory file descriptor (`fd`)
+/// remains open so we can use it with `unlinkat` later.
 ///
 /// # Inputs
 /// - `dir`: A canonicalized directory (absolute path) in which to search.
-/// - `matcher`: A reference to a GlobSet matcher built from the desired filename pattern.
+/// - `matcher`: A reference to a `GlobSet` matcher built from the desired filename pattern.
 ///
 /// # Output
-/// Returns an io::Result containing a Vec<PathBuf> with the full paths of all files
-/// that match the globset.
-fn collect_matching_files(dir: &Path, matcher: &GlobSet, files: &mut Vec<CString>) -> io::Result<()> {
-    // Open the directory using the raw syscall interface.
-    let c_path = CString::new(dir.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Directory path contains null byte"))?;
+/// Returns an `io::Result<(RawFd, Vec<CString>)>` containing:
+///   1. A file descriptor (open directory) to be used with `unlinkat`.
+///   2. A list of matching filenames (as CStrings), not full paths.
+fn collect_matching_files(
+    dir: &Path,
+    matcher: &GlobSet,
+) -> io::Result<(RawFd, Vec<CString>)> {
+    // Open the directory using the raw syscall interface
+    let c_path = CString::new(dir.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "Directory path contains null byte")
+    })?;
+
     unsafe {
         let fd = libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        // Allocate a large buffer to minimize syscall overhead.
+
+        // Allocate a large buffer to minimize syscall overhead
         let buf_size = 1 << 26; // 64 MB
         let mut buf = vec![0u8; buf_size];
+        let mut files = Vec::new();
+
         loop {
             let nread = libc::syscall(
                 libc::SYS_getdents64,
@@ -222,29 +239,31 @@ fn collect_matching_files(dir: &Path, matcher: &GlobSet, files: &mut Vec<CString
                 let d = buf.as_ptr().add(bpos) as *const libc::dirent64;
                 let reclen = (*d).d_reclen as usize;
                 let name_ptr = (*d).d_name.as_ptr();
-                // Determine the length of the filename (until null terminator).
+
+                // Determine the length of the filename (until null terminator)
                 let mut namelen = 0;
                 while *name_ptr.add(namelen) != 0 {
                     namelen += 1;
                 }
+
                 // Skip entries for "." and ".."
                 if namelen > 0 {
                     let name_slice = std::slice::from_raw_parts(name_ptr as *const u8, namelen);
-                    if name_slice == b"." || name_slice == b".." {
-                        // Skip "." and ".."
-                    } else if (*d).d_type == libc::DT_REG {
-                        // Convert raw bytes to OsStr.
-                        let os_str = OsStr::from_bytes(name_slice);
-                        // Use globset matcher to check if the filename matches.
-                        if matcher.is_match(os_str) {
-                            // Construct full path by joining the directory and the file name.
-                            {
-                                let dir_bytes = dir.as_os_str().as_bytes();
-                                let mut full_path_bytes = Vec::with_capacity(dir_bytes.len() + 1 + name_slice.len());
-                                full_path_bytes.extend_from_slice(dir_bytes);
-                                full_path_bytes.push(b'/');
-                                full_path_bytes.extend_from_slice(name_slice);
-                                files.push(CString::new(full_path_bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Full path contains null byte"))?);
+                    if name_slice != b"." && name_slice != b".." {
+                        // Only consider regular files.
+                        if (*d).d_type == libc::DT_REG {
+                            let os_str = OsStr::from_bytes(name_slice);
+                            // Use globset matcher to check if the filename matches.
+                            if matcher.is_match(os_str) {
+                                // Store just the base name in the vector.
+                                match CString::new(name_slice) {
+                                    Ok(cstr_filename) => {
+                                        files.push(cstr_filename);
+                                    }
+                                    Err(_) => {
+                                        // If there's a null byte in the filename, skip.
+                                    }
+                                }
                             }
                         }
                     }
@@ -252,8 +271,8 @@ fn collect_matching_files(dir: &Path, matcher: &GlobSet, files: &mut Vec<CString
                 bpos += reclen;
             }
         }
-        libc::close(fd);
-        Ok(())
+        // At this point, we do NOT close(fd). We return it alongside the filenames.
+        Ok((fd, files))
     }
 }
 
