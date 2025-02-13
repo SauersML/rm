@@ -1658,7 +1658,7 @@ mod collect_tests {
         fs,
         io,
         os::unix::fs::symlink,
-        path::{Path, PathBuf},
+        path::{Path},
     };
     use tempfile::TempDir;
 
