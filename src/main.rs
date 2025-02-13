@@ -42,7 +42,7 @@ fn compute_optimal_concurrency(num_files: usize) -> usize {
 /// Main async entry point
 /// Performs a single-pass collection of matching files (using `collect_matching_files`),
 /// then deletes them concurrently with a progress bar
-async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io::Result<()> {
+async fn run_deletion_tokio(pattern: &str, concurrency_override: Option<usize>) -> io::Result<()> {
     // Split the pattern into directory & filename parts
     let (dir_path, file_pattern) = pattern.rsplit_once('/').unwrap_or((".", pattern));
     let dir = Path::new(dir_path);
@@ -166,7 +166,7 @@ fn main() {
 
     let pattern = &args[1];
 
-    let result = runtime.block_on(run_deletion(pattern, None));
+    let result = runtime.block_on(run_deletion_tokio(pattern, None));
 
     match result {
         Ok(_) => println!("Files matching '{}' deleted successfully!", pattern),
@@ -537,7 +537,7 @@ mod performance_tests {
     fn measure_rust_deletion(pattern: &str) -> f64 {
         let start = Instant::now();
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
-        let result = rt.block_on(run_deletion(pattern, None));
+        let result = rt.block_on(run_deletion_tokio(pattern, None));
         let elapsed = start.elapsed().as_secs_f64();
 
         if let Err(e) = result {
@@ -1158,7 +1158,7 @@ mod test_grid {
                 for concurrency in concurrency_levels {
                     create_test_files(tmp_dir.path(), num_files);
                     let start = Instant::now();
-                    runtime.block_on(run_deletion(&pattern, Some(concurrency))).unwrap();
+                    runtime.block_on(run_deletion_tokio(&pattern, Some(concurrency))).unwrap();
                     let elapsed = start.elapsed();
                     println!(
                         "  Simulated CPUs: {}, Files: {}, Concurrency: {}, Time: {:?}",
