@@ -110,23 +110,21 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
                 // Note: The `filename_cstr` is just the base name; we use AT_EMPTY_PATH from libc.
                 let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), libc::AT_EMPTY_PATH) };
 
-                match result {
-                    Ok(_) => {
-                        let done_so_far = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                        // Update progress in batches to minimize overhead
-                        if done_so_far % BATCH_SIZE == 0 {
-                            pb.inc(BATCH_SIZE as u64);
-                        }
+                if result == 0 {
+                    let done_so_far = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    // Update progress in batches to minimize overhead
+                    if done_so_far % BATCH_SIZE == 0 {
+                        pb.inc(BATCH_SIZE as u64);
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "Failed to delete '{}': {}",
-                            filename_cstr.to_string_lossy(),
-                            e
-                        );
-                        // Exit on the first deletion error
-                        std::process::exit(1);
-                    }
+                } else {
+                    let e = io::Error::last_os_error();
+                    eprintln!(
+                        "Failed to delete '{}': {}",
+                        filename_cstr.to_string_lossy(),
+                        e
+                    );
+                    // Exit on the first deletion error
+                    std::process::exit(1);
                 }
             }
         })
