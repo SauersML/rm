@@ -1862,7 +1862,8 @@ mod collect_tests {
         let matcher = build_matcher("testmatch*.txt");
 
         let start = std::time::Instant::now();
-        let files = collect_matching_files(dir, &matcher)?;
+        let mut files = Vec::<CString>::new();
+        collect_matching_files(dir, &matcher, &mut files)?;
         let elapsed = start.elapsed();
         println!(
             "Performance test: Collected {} matching files out of {} in {:?}",
