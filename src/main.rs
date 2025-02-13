@@ -108,7 +108,7 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
             async move {
                 // Attempt to delete the file using libc::unlinkat.
                 // Note: The `filename_cstr` is just the base name; we use AT_EMPTY_PATH from libc.
-                let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), libc::AT_EMPTY_PATH) };
+                let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
 
                 if result == 0 {
                     let done_so_far = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
