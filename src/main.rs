@@ -16,7 +16,6 @@ use lazy_static::lazy_static;
 use progression::{Bar, Config};
 use std::ffi::{OsStr};
 use std::os::unix::ffi::OsStrExt;
-use std::path::{PathBuf};
 use globset::GlobSet;
 
 /// Delete a single file via a direct `unlink` (libc) call.
@@ -75,7 +74,8 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e)))?;
 
     // Collect all matching files in a single pass using the fast getdents64 approach.
-    let matched_files = collect_matching_files(&canonical_dir, &glob_set)?;
+    let mut matched_files = Vec::<CString>::new();
+    collect_matching_files(&canonical_dir, &glob_set, &mut matched_files)?;
     let total_files = matched_files.len();
     if total_files == 0 {
         println!("No matching files found for pattern '{}'.", pattern);
@@ -111,12 +111,12 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
     let completed_counter_clone = Arc::clone(&completed_counter);
 
     file_stream
-        .for_each_concurrent(Some(concurrency), move |path| {
+        .for_each_concurrent(Some(concurrency), move |cstr| {
             let pb = Arc::clone(&pb_clone);
             let completed_counter = Arc::clone(&completed_counter_clone);
             async move {
                 // Attempt to delete the file.
-                match unlink_file(&path) {
+                match unlink_file(Path::new(OsStr::from_bytes(cstr.to_bytes()))) {
                     Ok(_) => {
                         let done_so_far = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
                         // Update progress in batches to minimize overhead.
@@ -125,7 +125,7 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
                         }
                     }
                     Err(e) => {
-                        eprintln!("Failed to delete '{}': {}", path.display(), e);
+                        eprintln!("Failed to delete '{}': {}", Path::new(OsStr::from_bytes(cstr.to_bytes())).display(), e);
                         // In this design, we exit on the first deletion error.
                         std::process::exit(1);
                     }
@@ -190,7 +190,7 @@ fn main() {
 /// # Output
 /// Returns an io::Result containing a Vec<PathBuf> with the full paths of all files
 /// that match the globset.
-fn collect_matching_files(dir: &Path, matcher: &GlobSet) -> io::Result<Vec<PathBuf>> {
+fn collect_matching_files(dir: &Path, matcher: &GlobSet, files: &mut Vec<CString>) -> io::Result<()> {
     // Open the directory using the raw syscall interface.
     let c_path = CString::new(dir.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Directory path contains null byte"))?;
@@ -202,7 +202,6 @@ fn collect_matching_files(dir: &Path, matcher: &GlobSet) -> io::Result<Vec<PathB
         // Allocate a large buffer to minimize syscall overhead.
         let buf_size = 1 << 26; // 64 MB
         let mut buf = vec![0u8; buf_size];
-        let mut files = Vec::new();
         loop {
             let nread = libc::syscall(
                 libc::SYS_getdents64,
@@ -238,7 +237,14 @@ fn collect_matching_files(dir: &Path, matcher: &GlobSet) -> io::Result<Vec<PathB
                         // Use globset matcher to check if the filename matches.
                         if matcher.is_match(os_str) {
                             // Construct full path by joining the directory and the file name.
-                            files.push(dir.join(os_str));
+                            {
+                                let dir_bytes = dir.as_os_str().as_bytes();
+                                let mut full_path_bytes = Vec::with_capacity(dir_bytes.len() + 1 + name_slice.len());
+                                full_path_bytes.extend_from_slice(dir_bytes);
+                                full_path_bytes.push(b'/');
+                                full_path_bytes.extend_from_slice(name_slice);
+                                files.push(CString::new(full_path_bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Full path contains null byte"))?);
+                            }
                         }
                     }
                 }
@@ -246,7 +252,7 @@ fn collect_matching_files(dir: &Path, matcher: &GlobSet) -> io::Result<Vec<PathB
             }
         }
         libc::close(fd);
-        Ok(files)
+        Ok(())
     }
 }
 
