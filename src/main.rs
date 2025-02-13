@@ -435,8 +435,8 @@ mod shell_performance {
         println!("\n===== {}: {} file(s) =====", test_name, file_count);
         println!("Using base test directory: {}", BASE_TEST_DIR);
 
-        // Run the Rust binary deletion benchmark
-        println!("--- Running Rust binary deletion benchmark ---");
+        // Run the Rust binary Deletion_Benchmark
+        println!("--- Running Rust binary Deletion_Benchmark ---");
         let mut rust_times = Vec::new();
         for iter in 0..ITERATIONS {
             rust_times.push(run_single_benchmark(test_name, file_count, "rust", iter));
@@ -447,8 +447,8 @@ mod shell_performance {
             test_name, min_r, max_r, mean_r, median_r, stddev_r
         );
 
-        // Run the system deletion benchmark
-        println!("--- Running system deletion benchmark ---");
+        // Run the system Deletion_Benchmark
+        println!("--- Running system Deletion_Benchmark ---");
         let mut system_times = Vec::new();
         for iter in 0..ITERATIONS {
             system_times.push(run_single_benchmark(test_name, file_count, "system", iter));
@@ -472,7 +472,7 @@ mod shell_performance {
         println!("=== Starting Shell Command Benchmarks ===");
         let file_counts = [1, 100, 25_000, 1_000_000];
         for &count in &file_counts {
-            run_benchmark_for_file_count("Deletion Benchmark", count);
+            run_benchmark_for_file_count("Deletion_Benchmark", count);
         }
         println!("=== Benchmarks Complete ===");
     }
