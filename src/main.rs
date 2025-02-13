@@ -365,7 +365,7 @@ mod shell_performance {
 
         // --- Benchmark using your Rust binary ---
         // We assume the built binary is located at "target/release/del"
-        let del_command = format!("target/release/del {}", pattern);
+        let del_command = format!("target/release/del \"{}\"", pattern);
         let rust_time = measure_command_time(&del_command, &pattern);
         println!(
             "[{}] target/release/del completed in {:.3} seconds",
