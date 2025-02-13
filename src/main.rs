@@ -209,7 +209,7 @@ fn collect_matching_files(
         // Allocate a large buffer to minimize syscall overhead
         let buf_size = 1 << 26; // 64 MB
         let mut buf = vec![0u8; buf_size];
-        let mut files = Vec::new();
+        let files = Vec::new();
 
         loop {
             let nread = libc::syscall(
@@ -1835,7 +1835,7 @@ mod collect_tests {
         let dir = temp_dir.path();
 
         let matcher = build_matcher("*.txt");
-        let mut files = Vec::<CString>::new();
+        let files = Vec::<CString>::new();
         collect_matching_files(dir, &matcher)?;
         assert!(files.is_empty(), "Expected no files in an empty directory");
         Ok(())
@@ -1852,7 +1852,7 @@ mod collect_tests {
             fs::write(dir.join(fname), b"dummy")?;
         }
         let matcher = build_matcher("*.txt");
-        let mut files = Vec::<CString>::new();
+        let files = Vec::<CString>::new();
         collect_matching_files(dir, &matcher)?;
         assert!(files.is_empty(), "Expected no matches for pattern '*.txt'");
         Ok(())
@@ -1914,7 +1914,7 @@ mod collect_tests {
         symlink(&target, &symlink_path)?;
 
         let matcher = build_matcher("*.txt");
-        let mut files = Vec::<CString>::new();
+        let files = Vec::<CString>::new();
         collect_matching_files(dir, &matcher)?;
         assert_eq!(files.len(), 1, "Expected only one regular file to be collected (directories and symlinks should be skipped)");
         let target_c = CString::new(target.as_os_str().as_bytes()).unwrap();
@@ -1927,7 +1927,7 @@ mod collect_tests {
     fn test_nonexistent_directory() {
         let fake_dir = Path::new("/this/dir/should/not/exist");
         let matcher = build_matcher("*.txt");
-        let mut temp_vec = Vec::<CString>::new();
+        let temp_vec = Vec::<CString>::new();
         let result = collect_matching_files(fake_dir, &matcher);
         assert!(result.is_err(), "Expected an error for a nonexistent directory");
     }
@@ -1949,7 +1949,7 @@ mod collect_tests {
         fs::set_permissions(dir, perms.clone())?;
 
         let matcher = build_matcher("*.txt");
-        let mut temp_vec = Vec::<CString>::new();
+        let temp_vec = Vec::<CString>::new();
         let result = collect_matching_files(dir, &matcher);
         // Restore permissions so TempDir can be cleaned up.
         perms.set_mode(0o755);
@@ -1976,7 +1976,7 @@ mod collect_tests {
         let matcher = build_matcher("testmatch*.txt");
 
         let start = std::time::Instant::now();
-        let mut files = Vec::<CString>::new();
+        let files = Vec::<CString>::new();
         collect_matching_files(dir, &matcher)?;
         let elapsed = start.elapsed();
         println!(
