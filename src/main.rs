@@ -1691,7 +1691,8 @@ mod collect_tests {
         let matcher = build_matcher("testmatch*.txt");
 
         // Call the function under test.
-        let mut collected = collect_matching_files(dir, &matcher)?;
+        let mut collected = Vec::<CString>::new();
+        collect_matching_files(dir, &matcher, &mut collected)?;
         collected.sort();
 
         // Build expected full paths.
@@ -1712,7 +1713,8 @@ mod collect_tests {
         let dir = temp_dir.path();
 
         let matcher = build_matcher("*.txt");
-        let files = collect_matching_files(dir, &matcher)?;
+        let mut files = Vec::<CString>::new();
+        collect_matching_files(dir, &matcher, &mut files)?;
         assert!(files.is_empty(), "Expected no files in an empty directory");
         Ok(())
     }
@@ -1728,7 +1730,8 @@ mod collect_tests {
             fs::write(dir.join(fname), b"dummy")?;
         }
         let matcher = build_matcher("*.txt");
-        let files = collect_matching_files(dir, &matcher)?;
+        let mut files = Vec::<CString>::new();
+        collect_matching_files(dir, &matcher, &mut files)?;
         assert!(files.is_empty(), "Expected no matches for pattern '*.txt'");
         Ok(())
     }
@@ -1744,7 +1747,8 @@ mod collect_tests {
         fs::write(dir.join(".hidden.txt"), b"dummy")?;
 
         let matcher = build_matcher("*.txt");
-        let mut collected = collect_matching_files(dir, &matcher)?;
+        let mut collected = Vec::<CString>::new();
+        collect_matching_files(dir, &matcher, &mut collected)?;
         collected.sort();
 
         let mut expected: Vec<PathBuf> =
@@ -1790,7 +1794,8 @@ mod collect_tests {
     fn test_nonexistent_directory() {
         let fake_dir = Path::new("/this/dir/should/not/exist");
         let matcher = build_matcher("*.txt");
-        let result = collect_matching_files(fake_dir, &matcher);
+        let mut temp_vec = Vec::<CString>::new();
+        let result = collect_matching_files(fake_dir, &matcher, &mut temp_vec);
         assert!(result.is_err(), "Expected an error for a nonexistent directory");
     }
 
@@ -1811,7 +1816,8 @@ mod collect_tests {
         fs::set_permissions(dir, perms.clone())?;
 
         let matcher = build_matcher("*.txt");
-        let result = collect_matching_files(dir, &matcher);
+        let mut temp_vec = Vec::<CString>::new();
+        let result = collect_matching_files(dir, &matcher, &mut temp_vec);
         // Restore permissions so TempDir can be cleaned up.
         perms.set_mode(0o755);
         fs::set_permissions(dir, perms)?;
