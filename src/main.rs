@@ -1662,7 +1662,7 @@ mod collect_tests {
 
         // Call the function under test.
         let mut collected = Vec::<CString>::new();
-        collect_matching_files(dir, &matcher, &mut collected)?;
+        collect_matching_files(dir, &matcher)?;
         collected.sort();
 
         // Build expected full paths.
@@ -1692,7 +1692,7 @@ mod collect_tests {
 
         let matcher = build_matcher("*.txt");
         let mut files = Vec::<CString>::new();
-        collect_matching_files(dir, &matcher, &mut files)?;
+        collect_matching_files(dir, &matcher)?;
         assert!(files.is_empty(), "Expected no files in an empty directory");
         Ok(())
     }
@@ -1709,7 +1709,7 @@ mod collect_tests {
         }
         let matcher = build_matcher("*.txt");
         let mut files = Vec::<CString>::new();
-        collect_matching_files(dir, &matcher, &mut files)?;
+        collect_matching_files(dir, &matcher)?;
         assert!(files.is_empty(), "Expected no matches for pattern '*.txt'");
         Ok(())
     }
@@ -1726,7 +1726,7 @@ mod collect_tests {
 
         let matcher = build_matcher("*.txt");
         let mut collected = Vec::<CString>::new();
-        collect_matching_files(dir, &matcher, &mut collected)?;
+        collect_matching_files(dir, &matcher)?;
         collected.sort();
 
         let mut expected: Vec<CString> = vec![
@@ -1771,7 +1771,7 @@ mod collect_tests {
 
         let matcher = build_matcher("*.txt");
         let mut files = Vec::<CString>::new();
-        collect_matching_files(dir, &matcher, &mut files)?;
+        collect_matching_files(dir, &matcher)?;
         assert_eq!(files.len(), 1, "Expected only one regular file to be collected (directories and symlinks should be skipped)");
         let target_c = CString::new(target.as_os_str().as_bytes()).unwrap();
         assert_eq!(files[0], target_c, "Collected file is not the expected regular file");
@@ -1784,7 +1784,7 @@ mod collect_tests {
         let fake_dir = Path::new("/this/dir/should/not/exist");
         let matcher = build_matcher("*.txt");
         let mut temp_vec = Vec::<CString>::new();
-        let result = collect_matching_files(fake_dir, &matcher, &mut temp_vec);
+        let result = collect_matching_files(fake_dir, &matcher);
         assert!(result.is_err(), "Expected an error for a nonexistent directory");
     }
 
@@ -1806,7 +1806,7 @@ mod collect_tests {
 
         let matcher = build_matcher("*.txt");
         let mut temp_vec = Vec::<CString>::new();
-        let result = collect_matching_files(dir, &matcher, &mut temp_vec);
+        let result = collect_matching_files(dir, &matcher);
         // Restore permissions so TempDir can be cleaned up.
         perms.set_mode(0o755);
         fs::set_permissions(dir, perms)?;
@@ -1833,7 +1833,7 @@ mod collect_tests {
 
         let start = std::time::Instant::now();
         let mut files = Vec::<CString>::new();
-        collect_matching_files(dir, &matcher, &mut files)?;
+        collect_matching_files(dir, &matcher)?;
         let elapsed = start.elapsed();
         println!(
             "Performance test: Collected {} matching files out of {} in {:?}",
