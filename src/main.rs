@@ -106,14 +106,9 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
             let pb = Arc::clone(&pb_clone);
             let completed_counter = Arc::clone(&completed_counter_clone);
             async move {
-                // Attempt to delete the file using `unlinkat`
-                // Note: The `filename_cstr` is just the base name; we rely on `AT_EMPTY_PATH`
-                // We also wrap the FD in Some(fd) so `unlinkat` references that directory
-                let result = unlinkat(
-                    Some(fd),
-                    filename_cstr.as_c_str(),
-                    AtFlags::AT_EMPTY_PATH,
-                );
+                // Attempt to delete the file using libc::unlinkat.
+                // Note: The `filename_cstr` is just the base name; we use AT_EMPTY_PATH from libc.
+                let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), libc::AT_EMPTY_PATH) };
 
                 match result {
                     Ok(_) => {
@@ -151,8 +146,8 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
         Err(_) => {}
     }
 
-    // Close the directory file descriptor.
-    let _ = nix_close(fd);
+    // Close the directory file descriptor
+    unsafe { libc::close(fd) };
 
     Ok(())
 }
