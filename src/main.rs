@@ -17,8 +17,7 @@ use progression::{Bar, Config};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
-use nix::fcntl::AtFlags;
-use nix::unistd::{close as nix_close, unlinkat};
+use nix::unistd::{close as nix_close, unlinkat, UnlinkatFlags};
 use globset::GlobSet;
 
 lazy_static! {
@@ -110,9 +109,9 @@ async fn run_deletion(pattern: &str, concurrency_override: Option<usize>) -> io:
             async move {
                 // Attempt to delete the file using `unlinkat`
                 // Note: The `filename_cstr` is just the base name; we rely on `AT_EMPTY_PATH`
-                // We also wrap the FD in Some(...) so `unlinkat` references that directory
+                // We also wrap the FD in Some(fd) so `unlinkat` references that directory
                 let result = unlinkat(
-                    Some(nix::dir::DirFd(fd)),
+                    Some(fd),
                     filename_cstr.as_c_str(),
                     AtFlags::AT_EMPTY_PATH,
                 );
