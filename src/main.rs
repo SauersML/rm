@@ -28,28 +28,58 @@ lazy_static! {
 
 /// Synchronous wrapper around the async function.
 fn main() {
-    let runtime = Builder::new_multi_thread() // Use a multi-threaded runtime
-        .enable_all()
-        .build()
-        .expect("Failed to build Tokio runtime");
-
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <pattern>", args[0]);
-        eprintln!("Example: {} 'some_files_*.txt'", args[0]);
+        eprintln!("Usage: {} <pattern> [--tokio|--rayon]", args[0]);
+        eprintln!("Example: {} 'some_files_*.txt' --tokio", args[0]);
         std::process::exit(1);
     }
 
     let pattern = &args[1];
 
-    let result = runtime.block_on(run_deletion_tokio(pattern, None));
-
-    match result {
-        Ok(_) => println!("Files matching '{}' deleted successfully!", pattern),
-        Err(e) => {
-            eprintln!("Error during deletion: {}", e);
-            std::process::exit(1);
+    // Determine deletion mode: default to tokio if not specified.
+    let deletion_mode = if args.len() >= 3 {
+        match args[2].as_str() {
+            "--tokio" => "tokio",
+            "--rayon" => "rayon",
+            flag => {
+                eprintln!("Unknown flag: {}. Expected --tokio or --rayon", flag);
+                std::process::exit(1);
+            }
         }
+    } else {
+        "tokio"
+    };
+
+    match deletion_mode {
+        "tokio" => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to build Tokio runtime");
+
+            let result = runtime.block_on(run_deletion_tokio(pattern, None));
+
+            match result {
+                Ok(_) => println!("Files matching '{}' deleted successfully!", pattern),
+                Err(e) => {
+                    eprintln!("Error during deletion: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "rayon" => {
+            let result = run_deletion_rayon(pattern, None);
+
+            match result {
+                Ok(_) => println!("Files matching '{}' deleted successfully!", pattern),
+                Err(e) => {
+                    eprintln!("Error during deletion: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => unreachable!(), // We've already validated the deletion_mode.
     }
 }
 
