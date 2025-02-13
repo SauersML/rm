@@ -18,6 +18,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
 use globset::GlobSet;
+use crossbeam::channel;
 
 lazy_static! {
     // Cache the number of CPUs and its f64 conversion as a static variable.
@@ -38,6 +39,102 @@ fn compute_optimal_concurrency(num_files: usize) -> usize {
     let candidate = optimal_concurrency.round() as usize;
     candidate
 }
+
+
+fn run_deletion_rayon(pattern: &str, concurrency_override: Option<usize>) -> io::Result<()> {
+    let (dir_path, file_pattern) = pattern.rsplit_once('/').unwrap_or((".", pattern));
+    let dir = Path::new(dir_path);
+    let canonical_dir = std::fs::canonicalize(dir)?;
+
+    let mut gs_builder = globset::GlobSetBuilder::new();
+    gs_builder.add(
+        globset::Glob::new(file_pattern)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid glob pattern: {}", e)))?,
+    );
+    let glob_set = gs_builder
+        .build()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e)))?;
+
+    let (fd, matched_files) = collect_matching_files(&canonical_dir, &glob_set)?;
+    let total_files = matched_files.len();
+    if total_files == 0 {
+        println!("No matching files found for pattern '{}'.", pattern);
+        unsafe {
+            libc::close(fd);
+        }
+        return Ok(());
+    }
+
+    let _concurrency = concurrency_override.unwrap_or_else(|| compute_optimal_concurrency(total_files));
+    println!(
+        "[INFO] Deleting {} files (CPU cores = {})",
+        total_files,
+        num_cpus::get()
+    );
+
+    let config = Config {
+        throttle_millis: 250,
+        ..Default::default()
+    };
+    let pb = Arc::new(Bar::new(total_files as u64, config));
+    const BATCH_SIZE: usize = 5000;
+
+    let (sender, receiver) = channel::unbounded::<usize>();
+
+    let pb_thread = std::thread::spawn({
+        let pb = Arc::clone(&pb);
+        move || {
+            let mut total_done = 0;
+            while let Ok(batch_count) = receiver.recv() {
+                total_done += batch_count;
+                pb.inc(batch_count as u64);
+            }
+            let remainder = total_files - total_done;
+            if remainder > 0 {
+                pb.inc(remainder as u64);
+            }
+            // Do NOT call pb.finish() here.
+        }
+    });
+
+    use rayon::prelude::*; // Import Rayon's traits
+
+    matched_files
+        .par_chunks(BATCH_SIZE)
+        .for_each(|batch| {
+            let sender = sender.clone();
+            let mut count = 0;
+            for filename_cstr in batch {
+                let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
+                if result == 0 {
+                    count += 1;
+                } else {
+                    let e = io::Error::last_os_error();
+                    eprintln!("Failed to delete '{}': {}", filename_cstr.to_string_lossy(), e);
+                    std::process::exit(1);
+                }
+            }
+            sender.send(count).unwrap();
+        });
+
+    drop(sender);
+    pb_thread.join().unwrap();
+
+    // Finish the progress bar *after* the thread has completed, using try_unwrap.
+    match Arc::try_unwrap(pb) {
+        Ok(bar) => bar.finish(), // We have unique ownership, so we can call finish().
+        Err(_) => eprintln!("[WARN] Could not get exclusive ownership of progress bar."), // Should not happen.
+    }
+
+
+    unsafe {
+        libc::close(fd);
+    }
+
+    Ok(())
+}
+
+
 
 /// Main async entry point
 /// Performs a single-pass collection of matching files (using `collect_matching_files`),
