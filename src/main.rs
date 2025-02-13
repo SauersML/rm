@@ -284,14 +284,14 @@ mod shell_performance {
     use tempfile::tempdir;
 
     /// Creates a number of test files (named "test_file_0.dat", "test_file_1.dat", …)
-    /// in the given directory. Each file is written with 1KB of zero bytes.
+    /// in the given directory. Each file is written with 0.5 KB of zero bytes.
     fn create_test_files(dir: &Path, count: usize) {
         for i in 0..count {
             let path = dir.join(format!("test_file_{}.dat", i));
             let mut file = File::create(&path)
                 .unwrap_or_else(|e| panic!("Failed to create {}: {}", path.display(), e));
-            // Write 1KB of zero bytes.
-            let content = vec![0u8; 1024];
+            // Write 0.5 KB of zero bytes.
+            let content = vec![0u8; 512];
             file.write_all(&content)
                 .unwrap_or_else(|e| panic!("Failed to write to {}: {}", path.display(), e));
         }
