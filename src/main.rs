@@ -269,6 +269,150 @@ fn collect_matching_files(
 
 // ====================================================================================================================================
 
+// cargo test --release -- --nocapture performance_tests
+#[cfg(test)]
+mod shell_performance {
+    use glob::glob;
+    use std::{
+        fs::{File},
+        io::Write,
+        path::Path,
+        process::Command,
+        thread::sleep,
+        time::{Duration, Instant},
+    };
+    use tempfile::tempdir;
+
+    /// Creates a number of test files (named "test_file_0.dat", "test_file_1.dat", …)
+    /// in the given directory. Each file is written with 1KB of zero bytes.
+    fn create_test_files(dir: &Path, count: usize) {
+        for i in 0..count {
+            let path = dir.join(format!("test_file_{}.dat", i));
+            let mut file = File::create(&path)
+                .unwrap_or_else(|e| panic!("Failed to create {}: {}", path.display(), e));
+            // Write 1KB of zero bytes.
+            let content = vec![0u8; 1024];
+            file.write_all(&content)
+                .unwrap_or_else(|e| panic!("Failed to write to {}: {}", path.display(), e));
+        }
+    }
+
+    /// Verifies that no files matching the given glob pattern remain.
+    /// Panics if any matching file is still present.
+    fn verify_no_files(pattern: &str) {
+        let mut count = 0;
+        for entry in glob(pattern).expect("Invalid glob pattern") {
+            if let Ok(path) = entry {
+                if path.is_file() {
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            panic!("Deletion failed: {} file(s) still exist matching {}", count, pattern);
+        }
+    }
+
+    /// Runs a shell command (via sh -c) and returns the elapsed time in seconds.
+    /// After the command runs, it verifies that no files matching the given pattern remain.
+    fn measure_command_time(command: &str, pattern: &str) -> f64 {
+        println!("Executing: {}", command);
+        let start = Instant::now();
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .output()
+            .unwrap_or_else(|e| panic!("Failed to execute command `{}`: {}", command, e));
+        if !output.status.success() {
+            panic!(
+                "Command `{}` failed:\n{}",
+                command,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let elapsed = start.elapsed().as_secs_f64();
+        // Small delay to ensure the filesystem is updated.
+        sleep(Duration::from_millis(100));
+        verify_no_files(pattern);
+        elapsed
+    }
+
+    /// Runs the benchmark for a given test scenario.
+    ///
+    /// It creates the specified number of files in a temporary directory,
+    /// then runs deletion twice:
+    ///   1. Using the Rust binary ("target/release/del")
+    ///   2. Using a system command (rm for one file and 25K files,
+    ///      and find for the 1M file case).
+    ///
+    /// It prints out the elapsed times for each command.
+    fn run_benchmark(test_name: &str, file_count: usize) {
+        println!("\n===== {} =====", test_name);
+        // Create a temporary directory.
+        let temp_dir = tempdir().expect("Failed to create temporary directory");
+        let dir_path = temp_dir.path();
+
+        // Define the glob pattern that matches the test files.
+        // (Note that our files are named "test_file_*.dat")
+        let pattern = format!("{}/test_file_*.dat", dir_path.to_string_lossy());
+
+        println!(
+            "Creating {} file(s) in {}",
+            file_count,
+            dir_path.display()
+        );
+        create_test_files(dir_path, file_count);
+
+        // --- Benchmark using your Rust binary ---
+        // We assume the built binary is located at "target/release/del"
+        let del_command = format!("target/release/del {}", pattern);
+        let rust_time = measure_command_time(&del_command, &pattern);
+        println!(
+            "[{}] target/release/del completed in {:.3} seconds",
+            test_name, rust_time
+        );
+
+        // Recreate the files for the system deletion test.
+        create_test_files(dir_path, file_count);
+        // Small delay before the next test.
+        sleep(Duration::from_millis(100));
+
+        // --- Benchmark using the system deletion command ---
+        // For the 1M file scenario, use the find command (which tends to scale better).
+        let sys_command = if file_count == 1_000_000 {
+            // Use find to delete all files in the directory (at maxdepth 1).
+            format!(
+                "find {} -maxdepth 1 -type f -delete",
+                dir_path.to_string_lossy()
+            )
+        } else {
+            // For one file and 25K files, use rm.
+            format!("rm -f {}/test_file_*.dat", dir_path.to_string_lossy())
+        };
+        let sys_time = measure_command_time(&sys_command, &pattern);
+        println!(
+            "[{}] System deletion command completed in {:.3} seconds",
+            test_name, sys_time
+        );
+    }
+
+    /// Main performance benchmark test that runs three scenarios:
+    /// 1. One file
+    /// 2. 25,000 files
+    /// 3. 1,000,000 files
+    ///
+    /// Each scenario runs both the Rust binary and the system deletion command.
+    #[test]
+    fn benchmark_shell_commands() {
+        println!("=== Starting Shell Command Benchmarks ===");
+        run_benchmark("One file", 1);
+        run_benchmark("25K files", 25_000);
+        run_benchmark("1M files", 1_000_000);
+        println!("=== Benchmarks Complete ===");
+    }
+}
+
+
 
 // cargo test --release -- --nocapture performance_tests
 #[cfg(test)]
