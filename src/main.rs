@@ -618,7 +618,7 @@ mod t_r_performance {
     };
 
     // Number of iterations per command
-    const ITERATIONS: usize = 5;
+    const ITERATIONS: usize = 10;
 
     // Base directory for test runs (make sure this exists on your system)
     const BASE_TEST_DIR: &str = "/home/hsiehph/sauer354/tmp_test";
@@ -690,7 +690,9 @@ mod t_r_performance {
     fn run_command(command: &str, pattern: &str) -> f64 {
         println!("Executing: {}", command);
         // Force pending I/O to disk before timing
-        Command::new("sync").status().expect("Failed to sync before command");
+        Command::new("sync")
+            .status()
+            .expect("Failed to sync before command");
         let start = Instant::now();
         let output = Command::new("sh")
             .arg("-c")
@@ -705,7 +707,9 @@ mod t_r_performance {
             );
         }
         // Force pending I/O to disk after command execution
-        Command::new("sync").status().expect("Failed to sync after command");
+        Command::new("sync")
+            .status()
+            .expect("Failed to sync after command");
         let elapsed = start.elapsed().as_secs_f64();
         // Small delay to allow filesystem metadata to settle
         sleep(Duration::from_millis(100));
@@ -726,14 +730,23 @@ mod t_r_performance {
         } else {
             sorted[sorted.len() / 2]
         };
-        let variance = times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / times.len() as f64;
+        let variance = times
+            .iter()
+            .map(|t| (t - mean).powi(2))
+            .sum::<f64>()
+            / times.len() as f64;
         let stddev = variance.sqrt();
         (min, max, mean, median, stddev)
     }
 
     /// Runs a single benchmark iteration for the given command type ("tokio" or "rayon")
     /// and returns the elapsed time in seconds.
-    fn run_single_benchmark(test_name: &str, file_count: usize, command_type: &str, iteration: usize) -> f64 {
+    fn run_single_benchmark(
+        test_name: &str,
+        file_count: usize,
+        command_type: &str,
+        iteration: usize,
+    ) -> f64 {
         // Prepare a fresh, isolated test directory
         let dir_path = prepare_test_directory(test_name, command_type, iteration);
         // Build the glob pattern for matching test files
@@ -755,10 +768,110 @@ mod t_r_performance {
         elapsed
     }
 
+    /// Approximates the error function.
+    fn erf(x: f64) -> f64 {
+        // Abramowitz and Stegun formula 7.1.26
+        let sign = if x < 0.0 { -1.0 } else { 1.0 };
+        let x = x.abs();
+        let a1 = 0.254829592;
+        let a2 = -0.284496736;
+        let a3 = 1.421413741;
+        let a4 = -1.453152027;
+        let a5 = 1.061405429;
+        let p = 0.3275911;
+        let t = 1.0 / (1.0 + p * x);
+        let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
+        sign * y
+    }
+
+    /// Approximates the cumulative distribution function for a standard normal.
+    fn normal_cdf(x: f64) -> f64 {
+        0.5 * (1.0 + erf(x / 2f64.sqrt()))
+    }
+
+    /// Performs a Mann–Whitney U test on two groups of f64 values.
+    /// Returns a tuple (U, p_value).
+    fn mann_whitney_u_test(group1: &[f64], group2: &[f64]) -> (f64, f64) {
+        let n1 = group1.len();
+        let n2 = group2.len();
+        let mut combined: Vec<(f64, u8)> = Vec::with_capacity(n1 + n2);
+        for &val in group1 {
+            combined.push((val, 1));
+        }
+        for &val in group2 {
+            combined.push((val, 2));
+        }
+        // Sort by value (ascending)
+        combined.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        // Assign ranks with tie correction
+        let mut ranks = vec![0.0; combined.len()];
+        let mut i = 0;
+        while i < combined.len() {
+            let mut j = i + 1;
+            while j < combined.len() && (combined[j].0 - combined[i].0).abs() < 1e-10 {
+                j += 1;
+            }
+            let rank_sum: f64 = ((i + 1)..=j).map(|r| r as f64).sum();
+            let avg_rank = rank_sum / ((j - i) as f64);
+            for k in i..j {
+                ranks[k] = avg_rank;
+            }
+            i = j;
+        }
+
+        // Sum of ranks for group1
+        let mut rank_sum1 = 0.0;
+        for (i, &(_, grp)) in combined.iter().enumerate() {
+            if grp == 1 {
+                rank_sum1 += ranks[i];
+            }
+        }
+        let U1 = rank_sum1 - (n1 * (n1 + 1)) as f64 / 2.0;
+        let U2 = (n1 * n2) as f64 - U1;
+        let U = U1.min(U2);
+
+        // Compute tie correction for variance adjustment
+        let N = n1 + n2;
+        let mut tie_sum = 0.0;
+        let mut i = 0;
+        while i < combined.len() {
+            let mut j = i + 1;
+            while j < combined.len() && (combined[j].0 - combined[i].0).abs() < 1e-10 {
+                j += 1;
+            }
+            let t = (j - i) as f64;
+            if t > 1.0 {
+                tie_sum += t * t * t - t;
+            }
+            i = j;
+        }
+        let var_U = (n1 as f64 * n2 as f64 / 12.0)
+            * ((N as f64 + 1.0) - tie_sum / ((N as f64) * (N as f64 - 1.0)));
+        let mean_U = (n1 * n2) as f64 / 2.0;
+        let z = if var_U > 0.0 {
+            (U - mean_U) / var_U.sqrt()
+        } else {
+            0.0
+        };
+        let p_value = 2.0 * (1.0 - normal_cdf(z.abs()));
+        (U, p_value)
+    }
+
+    /// Structure to hold benchmark results for a given file count.
+    struct BenchmarkResult {
+        file_count: usize,
+        tokio_mean: f64,
+        rayon_mean: f64,
+        u_stat: f64,
+        p_value: f64,
+        winner: &'static str,
+    }
+
     /// Runs the benchmark for a given test scenario (file count).
-    /// Both the Tokio and Rayon deletion methods are run over multiple iterations,
-    /// and comprehensive statistics are reported.
-    fn run_benchmark_for_file_count(test_name: &str, file_count: usize) {
+    /// Both the Tokio and Rayon deletion methods are run over multiple iterations.
+    /// Returns a BenchmarkResult containing mean times, Mann–Whitney U test statistic, p-value, and the winner.
+    fn run_benchmark_for_file_count(test_name: &str, file_count: usize) -> BenchmarkResult {
         println!("\n===== {}: {} file(s) =====", test_name, file_count);
         println!("Using base test directory: {}", BASE_TEST_DIR);
 
@@ -768,10 +881,13 @@ mod t_r_performance {
         for iter in 0..ITERATIONS {
             tokio_times.push(run_single_benchmark(test_name, file_count, "tokio", iter));
         }
-        let (min_tokio, max_tokio, mean_tokio, median_tokio, stddev_tokio) = calculate_stats(&tokio_times);
+        let (_min_tokio, _max_tokio, mean_tokio, _median_tokio, _stddev_tokio) =
+            calculate_stats(&tokio_times);
         println!(
-            "[{} - Tokio] min: {:.3} s, max: {:.3} s, mean: {:.3} s, median: {:.3} s, stddev: {:.3} s",
-            test_name, min_tokio, max_tokio, mean_tokio, median_tokio, stddev_tokio
+            "[{} - Tokio] mean: {:.3} s (n={})",
+            test_name,
+            mean_tokio,
+            tokio_times.len()
         );
 
         // Run the Rayon deletion benchmark
@@ -780,30 +896,65 @@ mod t_r_performance {
         for iter in 0..ITERATIONS {
             rayon_times.push(run_single_benchmark(test_name, file_count, "rayon", iter));
         }
-        let (min_rayon, max_rayon, mean_rayon, median_rayon, stddev_rayon) = calculate_stats(&rayon_times);
+        let (_min_rayon, _max_rayon, mean_rayon, _median_rayon, _stddev_rayon) =
+            calculate_stats(&rayon_times);
         println!(
-            "[{} - Rayon] min: {:.3} s, max: {:.3} s, mean: {:.3} s, median: {:.3} s, stddev: {:.3} s",
-            test_name, min_rayon, max_rayon, mean_rayon, median_rayon, stddev_rayon
+            "[{} - Rayon] mean: {:.3} s (n={})",
+            test_name,
+            mean_rayon,
+            rayon_times.len()
         );
+
+        // Perform Mann–Whitney U test on the two sets of times.
+        let (u_stat, p_value) = mann_whitney_u_test(&tokio_times, &rayon_times);
+
+        // Determine the winner based on lower mean time.
+        let winner = if mean_tokio < mean_rayon {
+            "Tokio"
+        } else if mean_rayon < mean_tokio {
+            "Rayon"
+        } else {
+            "Tie"
+        };
+
+        BenchmarkResult {
+            file_count,
+            tokio_mean: mean_tokio,
+            rayon_mean: mean_rayon,
+            u_stat,
+            p_value,
+            winner,
+        }
     }
 
-    /// Main performance benchmark test that runs three scenarios:
-    ///   1. 1 file
-    ///   2. 100 files
-    ///   3. 25,000 files
+    /// Main performance benchmark test.
     ///
     /// Each scenario runs both the Tokio and Rayon deletion methods over multiple iterations.
+    /// After all benchmarks, a final table with Mann–Whitney U test results is displayed.
     #[test]
     fn benchmark_shell_commands() {
         println!("=== Starting Shell Command Benchmarks ===");
-        let file_counts = [1, 100, 25_000];
+        let file_counts = [1, 5, 100, 5_000];
+        let mut results = Vec::new();
         for &count in &file_counts {
-            run_benchmark_for_file_count("Deletion_Benchmark", count);
+            let res = run_benchmark_for_file_count("Deletion_Benchmark", count);
+            results.push(res);
+        }
+        println!("\n=== Final Mann–Whitney U Test Results ===");
+        println!(
+            "{:<10} {:>14} {:>14} {:>10} {:>12} {:>10}",
+            "Files", "Tokio Mean(s)", "Rayon Mean(s)", "U", "p-value", "Winner"
+        );
+        println!("{}", "-".repeat(70));
+        for r in results {
+            println!(
+                "{:<10} {:>14.3} {:>14.3} {:>10.3} {:>12.4} {:>10}",
+                r.file_count, r.tokio_mean, r.rayon_mean, r.u_stat, r.p_value, r.winner
+            );
         }
         println!("=== Benchmarks Complete ===");
     }
 }
-
 
 // cargo test --release -- --nocapture performance_tests
 #[cfg(test)]
