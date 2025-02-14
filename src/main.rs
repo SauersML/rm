@@ -183,7 +183,6 @@ fn main() {
                 .expect("Failed to build Tokio runtime");
 
             let result = runtime.block_on(run_deletion_tokio(
-                pattern,
                 None,
                 progress_reporter,
                 fd,
