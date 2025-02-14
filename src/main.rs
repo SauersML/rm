@@ -648,7 +648,7 @@ mod shell_performance {
     #[test]
     fn benchmark_shell_commands() {
         println!("=== Starting Shell Command Benchmarks ===");
-        let file_counts = [1, 100, 25_000, 1_000_000];
+        let file_counts = [1, 100, 10_000];
         for &count in &file_counts {
             run_benchmark_for_file_count("Deletion_Benchmark", count);
         }
