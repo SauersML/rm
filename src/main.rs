@@ -2599,13 +2599,13 @@ mod rayon_tune {
         let csv_path = "rayon_deletion_benchmark.csv";
 
         // These are the file counts to test
-        let file_counts = [1, 10, 100, 1000, 10_000, 100_000];
+        let file_counts = [5, 50, 500, 5000, 50_000, 500_000];
 
         // Thread pool size factors to test (relative to CPU count)
-        let concurrency_factors = [0.5, 1.0, 2.0, 4.0];
+        let concurrency_factors = [0.25, 0.8, 1.2, 2.0, 4.0, 6.0];
 
         // Various batch sizes to try
-        let batch_sizes = [50, 500, 5_000, 50_000];
+        let batch_sizes = [100, 1000, 10_000, 100_000];
 
         // Loop over each file count.
         for &fc in &file_counts {
