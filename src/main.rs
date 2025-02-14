@@ -15,7 +15,7 @@ use progression::{Bar, Config};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
-use globset::GlobSet;
+use globset::{Glob, GlobSetBuilder};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use crossbeam::channel;
@@ -38,20 +38,18 @@ pub trait ProgressReporter {
     fn finish(&self);
 }
 
-/// A real progress bar that wraps an `Arc<Bar>` from the `progression` crate.
 /// This implementation actually updates the progress bar on each call.
-pub struct RealProgressBar {
-    bar: Arc<Bar>,
+pub struct RealProgressBar<'a> {
+    bar: Arc<Bar<'a>>,
 }
 
-impl RealProgressBar {
-    /// Creates a new `RealProgressBar` from an existing `Arc<Bar>`.
-    pub fn new(bar: Arc<Bar>) -> Self {
+impl<'a> RealProgressBar<'a> {
+    pub fn new(bar: Arc<Bar<'a>>) -> Self {
         Self { bar }
     }
 }
 
-impl ProgressReporter for RealProgressBar {
+impl<'a> ProgressReporter for RealProgressBar<'a> {
     #[inline(always)]
     fn inc(&self, n: u64) {
         self.bar.inc(n);
@@ -126,14 +124,14 @@ fn main() {
     };
 
     // Choose a progress reporter based on the total file count.
-    let progress_reporter = if matched_files_number < 1000 {
-        NoOpProgressBar::new()
+    let progress_reporter: Box<dyn ProgressReporter> = if matched_files.len() < 1000 {
+        Box::new(NoOpProgressBar::new())
     } else {
         let config = Config {
             throttle_millis: 250,
             ..Default::default()
         };
-        RealProgressBar::new(Arc::new(Bar::new(matched_files_number as u64, config)))
+        Box::new(RealProgressBar::new(Arc::new(Bar::new(matched_files.len() as u64, config))))
     };
 
     match deletion_mode {
