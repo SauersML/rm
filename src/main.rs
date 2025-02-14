@@ -225,7 +225,6 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
     matched_files: Vec<CString>,
     matched_files_number: usize,
 ) -> io::Result<()> {
-    let matched_files_number = matched_files.len();
     let concurrency = match concurrency_override {
         Some(n) => n,
         None => compute_optimal_concurrency_tokio(matched_files_number),
@@ -241,6 +240,7 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
     file_stream
         .for_each_concurrent(Some(concurrency), move |filename_cstr| {
             async move {
+                let progress_reporter = progress_reporter.clone();
                 let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
                 if result == 0 {
                     progress_reporter.inc(1);
