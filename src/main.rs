@@ -3,7 +3,6 @@ use std::{
     io,
     path::Path,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -40,6 +39,7 @@ pub trait ProgressReporter {
 /// `RealProgressBar` is a concrete implementation of `ProgressReporter`
 /// that updates a visible progress bar using an underlying `Bar` instance.
 /// The progress bar is wrapped in an `Arc` for safe sharing among threads.
+#[derive(Clone)]
 pub struct RealProgressBar<'a> {
     bar: Arc<Bar<'a>>,
 }
@@ -60,13 +60,18 @@ impl<'a> ProgressReporter for RealProgressBar<'a> {
 
     #[inline(always)]
     fn finish(&self) {
-        // Finalizes the underlying progress bar.
-        self.bar.finish();
+        match Arc::try_unwrap(Arc::clone(&self.bar)) {
+            Ok(bar) => bar.finish(),
+            Err(_) => {
+                eprintln!("[WARN] Unable to get exclusive ownership of progress bar.");
+            }
+        }
     }
 }
 
 /// `NoOpProgressBar` is a no-operation implementation of `ProgressReporter`.
 /// It performs no actions.
+#[derive(Clone)]
 pub struct NoOpProgressBar;
 
 impl NoOpProgressBar {
@@ -160,14 +165,14 @@ fn main() {
     // Choose a progress reporter based on the total file count.
     let matched_files_number = matched_files.len();
     let progress_reporter = if matched_files_number < 1000 {
-        NoOpProgressBar::new()
+        Progress::NoOp(NoOpProgressBar::new())
     } else {
         let config = Config {
             throttle_millis: 250,
             ..Default::default()
         };
         let bar = Arc::new(Bar::new(matched_files_number as u64, config));
-        RealProgressBar::new(Arc::clone(&bar))
+        Progress::Real(RealProgressBar::new(Arc::clone(&bar)))
     };
 
     match deletion_mode {
@@ -237,10 +242,11 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
     );
 
     let file_stream = futures::stream::iter(matched_files.into_iter());
+    let pr_for_tasks = progress_reporter.clone();
     file_stream
         .for_each_concurrent(Some(concurrency), move |filename_cstr| {
             async move {
-                let progress_reporter = progress_reporter.clone();
+                let progress_reporter = pr_for_tasks.clone();
                 let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
                 if result == 0 {
                     progress_reporter.inc(1);
