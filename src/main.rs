@@ -1,5 +1,4 @@
 use std::{
-    env,
     ffi::CString,
     io,
     path::Path,
@@ -11,7 +10,6 @@ use std::{
 
 use futures::StreamExt;
 use num_cpus;
-use tokio::runtime::Builder;
 use lazy_static::lazy_static;
 use progression::{Bar, Config};
 use std::ffi::OsStr;
