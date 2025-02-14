@@ -2588,7 +2588,7 @@ mod collect_tests {
 #[cfg(test)]
 mod rayon_tune {
     use super::*;
-    use std::fs::{OpenOptions, File};
+    use std::fs::OpenOptions;
     use std::io::Write;
     use std::time::Instant;
     use tempfile::TempDir;
@@ -2607,39 +2607,46 @@ mod rayon_tune {
         // Various batch sizes to try
         let batch_sizes = [50, 500, 5_000, 50_000];
 
+        // Loop over each file count.
         for &fc in &file_counts {
-            // Create a new temporary directory
-            let tmp_dir = TempDir::new().expect("Failed to create temp dir");
-
-            // Generate `fc` files that match our test pattern
-            // We'll call them "testfile_0.tmp", "testfile_1.tmp", etc.
-            for i in 0..fc {
-                let file_path = tmp_dir.path().join(format!("testfile_{}.tmp", i));
-                // Write out a small amount of data
-                std::fs::write(&file_path, b"some test data").unwrap();
-            }
-
-            // The pattern we will pass to run_deletion_rayon
-            // Example: "/tmp/xxxx/testfile_*.tmp"
-            let pattern = format!("{}/testfile_*.tmp", tmp_dir.path().display());
-
-            // For each concurrency factor, for each batch size, measure and record the time.
+            // For each concurrency factor...
             for &factor in &concurrency_factors {
-                // Convert the floating factor to an integer concurrency
+                // Convert the factor to an integer concurrency value.
                 let concurrency = (factor * (*N_CPUS_F)).ceil() as usize;
 
+                // And for each batch size...
                 for &bsize in &batch_sizes {
-                    // Start timing
+                    // Create a fresh temporary directory for this test run.
+                    let tmp_dir = TempDir::new().expect("Failed to create temp dir");
+
+                    // Generate `fc` files matching our pattern.
+                    for i in 0..fc {
+                        let file_path = tmp_dir.path().join(format!("testfile_{}.tmp", i));
+                        std::fs::write(&file_path, b"some test data").unwrap();
+                    }
+
+                    // Construct the glob pattern to match the generated files.
+                    let pattern = format!("{}/testfile_*.tmp", tmp_dir.path().display());
+
+                    println!(
+                        "[INFO] Deleting {} files using Rayon with concurrency = {}, batch_size = {} (from {})",
+                        fc,
+                        concurrency,
+                        bsize,
+                        tmp_dir.path().display()
+                    );
+
+                    // Start timing the deletion.
                     let start = Instant::now();
 
-                    // Run the Rayon-based deletion with the chosen concurrency & batch size
+                    // Run the Rayon-based deletion with the chosen concurrency and batch size.
                     let res = run_deletion_rayon(&pattern, Some(concurrency), Some(bsize));
 
                     let elapsed = start.elapsed();
-                    // If an error happened, we can fail the test
+                    // Ensure deletion succeeded.
                     res.expect("Deletion failed in grid search test");
 
-                    // Append the result to CSV
+                    // Append the test result to the CSV file.
                     let mut file = OpenOptions::new()
                         .create(true)
                         .append(true)
@@ -2647,7 +2654,6 @@ mod rayon_tune {
                         .expect("Could not open CSV for appending");
 
                     // CSV format: file_count, time_in_seconds, thread_pool_size, batch_size
-                    // (You can reorder columns if you prefer, but be consistent!)
                     writeln!(
                         file,
                         "{},{},{},{}",
@@ -2657,11 +2663,9 @@ mod rayon_tune {
                         bsize
                     )
                     .expect("Failed to write to CSV");
+                    // `tmp_dir` is dropped here and cleaned up.
                 }
             }
-
-            // Temporary directory and any remaining files are automatically cleaned up
-            // when `tmp_dir` goes out of scope.
         }
     }
 }
