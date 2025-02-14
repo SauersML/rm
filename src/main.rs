@@ -26,24 +26,26 @@ lazy_static! {
     static ref N_CPUS_F: f64 = *N_CPUS as f64;
 }
 
-/// A trait for reporting progress during file deletion.
-/// 
-/// Implementors of this trait provide mechanisms to update progress,
-/// such as incrementing a counter and finalizing the display.
+/// The `ProgressReporter` trait provides an interface for updating progress.
+/// Implementors of this trait supply methods to increment the progress counter
+/// and to finalize the progress display.
 pub trait ProgressReporter {
-    /// Increment the progress by `n`.
+    /// Increments the progress by a given number.
     fn inc(&self, n: u64);
 
-    /// Finalize the progress reporting (e.g., finish or clear the progress bar).
+    /// Finalizes the progress reporting.
     fn finish(&self);
 }
 
-/// This implementation actually updates the progress bar on each call.
+/// `RealProgressBar` is a concrete implementation of `ProgressReporter`
+/// that updates a visible progress bar using an underlying `Bar` instance.
+/// The progress bar is wrapped in an `Arc` for safe sharing among threads.
 pub struct RealProgressBar<'a> {
     bar: Arc<Bar<'a>>,
 }
 
 impl<'a> RealProgressBar<'a> {
+    /// Creates a new `RealProgressBar` from a shared `Bar`.
     pub fn new(bar: Arc<Bar<'a>>) -> Self {
         Self { bar }
     }
@@ -52,18 +54,19 @@ impl<'a> RealProgressBar<'a> {
 impl<'a> ProgressReporter for RealProgressBar<'a> {
     #[inline(always)]
     fn inc(&self, n: u64) {
+        // Increments the underlying progress bar.
         self.bar.inc(n);
     }
 
     #[inline(always)]
     fn finish(&self) {
+        // Finalizes the underlying progress bar.
         self.bar.finish();
     }
 }
 
-/// A no-operation progress bar implementation that does nothing.
-/// This is used when no progress reporting is needed, and its methods
-/// are inlined to guarantee zero overhead.
+/// `NoOpProgressBar` is a no-operation implementation of `ProgressReporter`.
+/// It performs no actions.
 pub struct NoOpProgressBar;
 
 impl NoOpProgressBar {
@@ -77,12 +80,43 @@ impl NoOpProgressBar {
 impl ProgressReporter for NoOpProgressBar {
     #[inline(always)]
     fn inc(&self, _n: u64) {
-        // Intentionally left blank for zero overhead.
+        // Intentionally does nothing to avoid overhead.
     }
 
     #[inline(always)]
     fn finish(&self) {
-        // Intentionally left blank for zero overhead.
+        // Intentionally does nothing to avoid overhead.
+    }
+}
+
+/// The `Progress` enum unifies the two progress reporting implementations
+/// into a single type. It allows code to use a progress reporter without
+/// knowing whether it is a real progress bar or a no-op.
+#[derive(Clone)]
+pub enum Progress<'a> {
+    /// Variant for the no-operation progress reporter.
+    NoOp(NoOpProgressBar),
+    /// Variant for the real progress bar reporter.
+    Real(RealProgressBar<'a>),
+}
+
+impl<'a> ProgressReporter for Progress<'a> {
+    #[inline(always)]
+    fn inc(&self, n: u64) {
+        // Match on the variant and delegate the increment operation.
+        match self {
+            Progress::NoOp(p) => p.inc(n),
+            Progress::Real(p) => p.inc(n),
+        }
+    }
+
+    #[inline(always)]
+    fn finish(&self) {
+        // Match on the variant and delegate the finish operation.
+        match self {
+            Progress::NoOp(p) => p.finish(),
+            Progress::Real(p) => p.finish(),
+        }
     }
 }
 
