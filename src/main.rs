@@ -149,36 +149,6 @@ fn main() {
 /// Performs a single-pass collection of matching files (using `collect_matching_files`),
 /// then deletes them concurrently with a progress bar
 async fn run_deletion_tokio(pattern: &str, concurrency_override: Option<usize>) -> io::Result<()> {
-    // Split the pattern into directory & filename parts
-    let (dir_path, file_pattern) = pattern.rsplit_once('/').unwrap_or((".", pattern));
-    let dir = Path::new(dir_path);
-
-    // Canonicalize the directory for safety
-    let canonical_dir = std::fs::canonicalize(dir)?;
-
-    // Build a globset matcher from the filename pattern
-    let mut gs_builder = globset::GlobSetBuilder::new();
-    gs_builder.add(
-        globset::Glob::new(file_pattern).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid glob pattern: {}", e))
-        })?,
-    );
-    let glob_set = gs_builder.build().map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e))
-    })?;
-
-    // Collect all matching filenames (base names only) and keep the directory open
-    let (fd, matched_files) = collect_matching_files(&canonical_dir, &glob_set)?;
-    let total_files = matched_files.len();
-    if total_files == 0 {
-        println!("No matching files found for pattern '{}'.", pattern);
-        // Close the directory FD if no matches
-        unsafe {
-            libc::close(fd);
-        }
-        return Ok(());
-    }
-
     // Compute concurrency (unless an override is given)
     let concurrency = match concurrency_override {
         Some(n) => n,
@@ -285,43 +255,48 @@ fn compute_optimal_concurrency_rayon(num_files: usize) -> usize {
     candidate
 }
 
-fn run_deletion_rayon(
-    pattern: &str,
-    thread_pool_size: Option<usize>,
-    batch_size_override: Option<usize>,
-) -> io::Result<()> {
-    // Split the pattern into directory & filename.
+/// Collects matching filenames from the given directory using `collect_matching_files`.
+/// Returns a tuple of (fd, Vec<CString>, total_count) on success,
+/// or `Ok(None)` if no matching files are found.
+/// The caller is responsible for closing the file descriptor if matches are returned.
+#[inline(always)]
+fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>, usize)>> {
+    // Split the pattern into directory & filename parts.
     let (dir_path, file_pattern) = pattern.rsplit_once('/').unwrap_or((".", pattern));
     let dir = Path::new(dir_path);
 
-    // Canonicalize directory
+    // Canonicalize the directory
     let canonical_dir = std::fs::canonicalize(dir)?;
 
-    // Build globset
-    let mut gs_builder = globset::GlobSetBuilder::new();
+    // Build the globset matcher
+    let mut gs_builder = GlobSetBuilder::new();
     gs_builder.add(
-        globset::Glob::new(file_pattern).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Invalid glob pattern: {}", e),
-            )
-        })?,
+        Glob::new(file_pattern)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid glob pattern: {}", e)))?
     );
-    let glob_set = gs_builder.build().map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e))
-    })?;
+    let glob_set = gs_builder.build()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e)))?;
 
     // Collect matching files
     let (fd, matched_files) = collect_matching_files(&canonical_dir, &glob_set)?;
     let total_files = matched_files.len();
+
     if total_files == 0 {
         println!("No matching files found for pattern '{}'.", pattern);
         unsafe {
             libc::close(fd);
         }
-        return Ok(());
+        return Ok(None);
     }
 
+    Ok(Some((fd, matched_files, total_files)))
+}
+
+fn run_deletion_rayon(
+    pattern: &str,
+    thread_pool_size: Option<usize>,
+    batch_size_override: Option<usize>,
+) -> io::Result<()> {
     // If no thread pool size was given, compute one automatically
     let concurrency = thread_pool_size.unwrap_or_else(|| compute_optimal_concurrency_rayon(total_files));
 
