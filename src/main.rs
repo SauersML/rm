@@ -19,6 +19,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
 use globset::GlobSet;
 use rayon::ThreadPoolBuilder;
+use rayon::prelude::*;
 use crossbeam::channel;
 
 lazy_static! {
