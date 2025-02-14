@@ -14,7 +14,7 @@ This is a Rust-based command-line utility that deletes files matching a given pa
 To install the utility globally, run:
 
 ```bash
-cargo install del
+RUSTFLAGS="-C target-cpu=native" cargo install del
 ```
 
 Or download the binary directly:
