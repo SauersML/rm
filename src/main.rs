@@ -579,7 +579,7 @@ mod shell_performance {
         // Prepare a fresh, isolated test directory
         let dir_path = prepare_test_directory(test_name, command_type, iteration);
         // Build the glob pattern for matching test files
-        let pattern = format!("{}/test_file_*.dat", dir_path.to_string_lossy());
+        let pattern = format!("{}/t*.dat", dir_path.to_string_lossy());
         println!("Creating {} file(s) in {}", file_count, dir_path.display());
         create_test_files(&dir_path, file_count);
         // Choose the command based on the command type.
@@ -591,7 +591,7 @@ mod shell_performance {
             if file_count == 1_000_000 {
                 format!("find {} -maxdepth 1 -type f -delete", dir_path.to_string_lossy())
             } else {
-                format!("rm -f {}/test_file_*.dat", dir_path.to_string_lossy())
+                format!("rm -f {}/t*.dat", dir_path.to_string_lossy())
             }
         };
         let elapsed = run_command(&command, &pattern);
@@ -802,7 +802,7 @@ mod t_r_performance {
         // Prepare a fresh, isolated test directory
         let dir_path = prepare_test_directory(test_name, command_type, iteration);
         // Build the glob pattern for matching test files
-        let pattern = format!("{}/test_file_*.dat", dir_path.to_string_lossy());
+        let pattern = format!("{}/t*.dat", dir_path.to_string_lossy());
         println!("Creating {} file(s) in {}", file_count, dir_path.display());
         create_test_files(&dir_path, file_count);
         // Build the command for the Rust binary deletion.
@@ -1168,7 +1168,7 @@ mod performance_tests {
                 let pattern = base_path.join("[0-9a-z]*");
                 (pattern.to_string_lossy().to_string(), create_short_test_files)
             } else {
-                let pattern = base_path.join("test_file_*.dat");
+                let pattern = base_path.join("t*.dat");
                 (pattern.to_string_lossy().to_string(), create_test_files)
             };
 
