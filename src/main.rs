@@ -124,14 +124,16 @@ fn main() {
     };
 
     // Choose a progress reporter based on the total file count.
-    let progress_reporter: Box<dyn ProgressReporter> = if matched_files.len() < 1000 {
-        Box::new(NoOpProgressBar::new())
+    let matched_files_number = matched_files.len();
+    let progress_reporter = if matched_files_number < 1000 {
+        NoOpProgressBar::new()
     } else {
         let config = Config {
             throttle_millis: 250,
             ..Default::default()
         };
-        Box::new(RealProgressBar::new(Arc::new(Bar::new(matched_files.len() as u64, config))))
+        let bar = Arc::new(Bar::new(matched_files_number as u64, config));
+        RealProgressBar::new(Arc::clone(&bar))
     };
 
     match deletion_mode {
@@ -147,6 +149,7 @@ fn main() {
                 progress_reporter,
                 fd,
                 matched_files,
+                matched_files_number,
             ));
 
             match result {
@@ -159,12 +162,12 @@ fn main() {
         }
         "rayon" => {
             let result = run_deletion_rayon(
-                pattern,
                 None,
                 None,
                 progress_reporter,
                 fd,
                 matched_files,
+                matched_files_number,
             );
 
             match result {
@@ -180,12 +183,13 @@ fn main() {
 }
 
 /// Main async entry point
-async fn run_deletion_tokio<P: ProgressReporter>(
+async fn run_deletion_tokio<P: ProgressReporter + Clone>(
     pattern: &str,
     concurrency_override: Option<usize>,
     progress_reporter: P,
     fd: RawFd,
     matched_files: Vec<CString>,
+    matched_files_number: usize,
 ) -> io::Result<()> {
     let matched_files_number = matched_files.len();
     let concurrency = match concurrency_override {
@@ -225,13 +229,13 @@ async fn run_deletion_tokio<P: ProgressReporter>(
     Ok(())
 }
 
-fn run_deletion_rayon<P: ProgressReporter>(
-    pattern: &str,
+fn run_deletion_rayon<P: ProgressReporter + Clone>(
     thread_pool_size: Option<usize>,
     batch_size_override: Option<usize>,
     progress_reporter: P,
     fd: RawFd,
     matched_files: Vec<CString>,
+    matched_files_number: usize,
 ) -> io::Result<()> {
     // If no thread pool size was given, compute one automatically
     let concurrency = thread_pool_size.unwrap_or_else(|| compute_optimal_concurrency_rayon(matched_files_number));
