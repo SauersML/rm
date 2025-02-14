@@ -145,10 +145,80 @@ fn main() {
     }
 }
 
+
+/// Compute the optimal concurrency level
+/// Model: optimal concurrency = e^((1.6063) + (0.6350 * log(CPUs)) - (0.0909 * log((NumFiles + 1))))
+fn compute_optimal_concurrency_tokio(num_files: usize) -> usize {
+    let num_files_f = num_files as f64;
+
+    // Compute the optimal concurrency using the cached N_CPUS_F
+    let optimal_concurrency =
+        (1.6063 + 0.6350 * N_CPUS_F.ln() - 0.0909 * (num_files_f + 1.0).ln()).exp();
+
+    // Round the result
+    let candidate = optimal_concurrency.round() as usize;
+    candidate
+}
+
+/// Compute the optimal concurrency level
+/// Model: optimal concurrency = e^((1.6063) + (0.6350 * log(CPUs)) - (0.0909 * log((NumFiles + 1))))
+fn compute_optimal_concurrency_rayon(num_files: usize) -> usize {
+    let num_files_f = num_files as f64;
+
+    // Compute the optimal concurrency using the cached N_CPUS_F
+    let optimal_concurrency =
+        (1.6063 + 0.6350 * N_CPUS_F.ln() - 0.0909 * (num_files_f + 1.0).ln()).exp();
+
+    // Round the result
+    let candidate = optimal_concurrency.round() as usize;
+    candidate
+}
+
+/// Collects matching filenames from the given directory using `collect_matching_files`.
+/// Returns a tuple of (fd, Vec<CString>, total_count) on success,
+/// or `Ok(None)` if no matching files are found.
+/// The caller is responsible for closing the file descriptor if matches are returned.
+#[inline(always)]
+fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>, usize)>> {
+    // Split the pattern into directory & filename parts.
+    let (dir_path, file_pattern) = pattern.rsplit_once('/').unwrap_or((".", pattern));
+    let dir = Path::new(dir_path);
+
+    // Canonicalize the directory
+    let canonical_dir = std::fs::canonicalize(dir)?;
+
+    // Build the globset matcher
+    let mut gs_builder = GlobSetBuilder::new();
+    gs_builder.add(
+        Glob::new(file_pattern)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid glob pattern: {}", e)))?
+    );
+    let glob_set = gs_builder.build()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e)))?;
+
+    // Collect matching files
+    let (fd, matched_files) = collect_matching_files(&canonical_dir, &glob_set)?;
+    let total_files = matched_files.len();
+
+    if total_files == 0 {
+        println!("No matching files found for pattern '{}'.", pattern);
+        unsafe {
+            libc::close(fd);
+        }
+        return Ok(None);
+    }
+
+    Ok(Some((fd, matched_files, total_files)))
+}
+
 /// Main async entry point
 /// Performs a single-pass collection of matching files (using `collect_matching_files`),
 /// then deletes them concurrently with a progress bar
-async fn run_deletion_tokio(pattern: &str, concurrency_override: Option<usize>) -> io::Result<()> {
+async fn run_deletion_tokio<P: ProgressReporter>(
+    pattern: &str,
+    concurrency_override: Option<usize>,
+    progress_reporter: P,
+) -> io::Result<()> {
     // Compute concurrency (unless an override is given)
     let concurrency = match concurrency_override {
         Some(n) => n,
@@ -227,75 +297,11 @@ async fn run_deletion_tokio(pattern: &str, concurrency_override: Option<usize>) 
 }
 
 
-/// Compute the optimal concurrency level
-/// Model: optimal concurrency = e^((1.6063) + (0.6350 * log(CPUs)) - (0.0909 * log((NumFiles + 1))))
-fn compute_optimal_concurrency_tokio(num_files: usize) -> usize {
-    let num_files_f = num_files as f64;
-
-    // Compute the optimal concurrency using the cached N_CPUS_F
-    let optimal_concurrency =
-        (1.6063 + 0.6350 * N_CPUS_F.ln() - 0.0909 * (num_files_f + 1.0).ln()).exp();
-
-    // Round the result
-    let candidate = optimal_concurrency.round() as usize;
-    candidate
-}
-
-/// Compute the optimal concurrency level
-/// Model: optimal concurrency = e^((1.6063) + (0.6350 * log(CPUs)) - (0.0909 * log((NumFiles + 1))))
-fn compute_optimal_concurrency_rayon(num_files: usize) -> usize {
-    let num_files_f = num_files as f64;
-
-    // Compute the optimal concurrency using the cached N_CPUS_F
-    let optimal_concurrency =
-        (1.6063 + 0.6350 * N_CPUS_F.ln() - 0.0909 * (num_files_f + 1.0).ln()).exp();
-
-    // Round the result
-    let candidate = optimal_concurrency.round() as usize;
-    candidate
-}
-
-/// Collects matching filenames from the given directory using `collect_matching_files`.
-/// Returns a tuple of (fd, Vec<CString>, total_count) on success,
-/// or `Ok(None)` if no matching files are found.
-/// The caller is responsible for closing the file descriptor if matches are returned.
-#[inline(always)]
-fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>, usize)>> {
-    // Split the pattern into directory & filename parts.
-    let (dir_path, file_pattern) = pattern.rsplit_once('/').unwrap_or((".", pattern));
-    let dir = Path::new(dir_path);
-
-    // Canonicalize the directory
-    let canonical_dir = std::fs::canonicalize(dir)?;
-
-    // Build the globset matcher
-    let mut gs_builder = GlobSetBuilder::new();
-    gs_builder.add(
-        Glob::new(file_pattern)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid glob pattern: {}", e)))?
-    );
-    let glob_set = gs_builder.build()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e)))?;
-
-    // Collect matching files
-    let (fd, matched_files) = collect_matching_files(&canonical_dir, &glob_set)?;
-    let total_files = matched_files.len();
-
-    if total_files == 0 {
-        println!("No matching files found for pattern '{}'.", pattern);
-        unsafe {
-            libc::close(fd);
-        }
-        return Ok(None);
-    }
-
-    Ok(Some((fd, matched_files, total_files)))
-}
-
-fn run_deletion_rayon(
+fn run_deletion_rayon<P: ProgressReporter>(
     pattern: &str,
     thread_pool_size: Option<usize>,
     batch_size_override: Option<usize>,
+    progress_reporter: P,
 ) -> io::Result<()> {
     // If no thread pool size was given, compute one automatically
     let concurrency = thread_pool_size.unwrap_or_else(|| compute_optimal_concurrency_rayon(total_files));
