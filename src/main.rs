@@ -15,7 +15,7 @@ use progression::{Bar, Config};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
-use globset::{Glob, GlobSetBuilder};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use crossbeam::channel;
@@ -230,6 +230,8 @@ fn run_deletion_rayon<P: ProgressReporter>(
     thread_pool_size: Option<usize>,
     batch_size_override: Option<usize>,
     progress_reporter: P,
+    fd: RawFd,
+    matched_files: Vec<CString>,
 ) -> io::Result<()> {
     // If no thread pool size was given, compute one automatically
     let concurrency = thread_pool_size.unwrap_or_else(|| compute_optimal_concurrency_rayon(matched_files_number));
@@ -250,7 +252,7 @@ fn run_deletion_rayon<P: ProgressReporter>(
         throttle_millis: 250,
         ..Default::default()
     };
-    let pb = Arc::new(Bar::new(matched_files_number as u64, config));
+    let pb = Arc::new(Bar::new(matched_files.len() as u64, config));
 
     // We'll send completed counts in batches to the progress bar thread.
     let (sender, receiver) = channel::unbounded::<usize>();
