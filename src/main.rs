@@ -249,14 +249,14 @@ fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>, usize
 }
 
 /// Main async entry point
-/// Performs a single-pass collection of matching files (using `collect_matching_files`),
-/// then deletes them concurrently with a progress bar
 async fn run_deletion_tokio<P: ProgressReporter>(
     pattern: &str,
     concurrency_override: Option<usize>,
     progress_reporter: P,
+    fd: RawFd,
+    matched_files: Vec<CString>,
 ) -> io::Result<()> {
-    // Compute concurrency (unless an override is given)
+    let total_files = matched_files.len();
     let concurrency = match concurrency_override {
         Some(n) => n,
         None => compute_optimal_concurrency_tokio(total_files),
@@ -268,37 +268,13 @@ async fn run_deletion_tokio<P: ProgressReporter>(
         num_cpus::get()
     );
 
-    // Set up a progress bar
-    let config = Config {
-        throttle_millis: 250,
-        ..Default::default()
-    };
-    let pb = Arc::new(Bar::new(total_files as u64, config));
-
-    // Create shared state for counting deletions.
-    let completed_counter = Arc::new(AtomicUsize::new(0));
-    const BATCH_SIZE: usize = 120;
-
-    // Convert the matched files into a stream, then delete concurrently.
     let file_stream = futures::stream::iter(matched_files.into_iter());
-    let pb_clone = Arc::clone(&pb);
-    let completed_counter_clone = Arc::clone(&completed_counter);
-
     file_stream
         .for_each_concurrent(Some(concurrency), move |filename_cstr| {
-            let pb = Arc::clone(&pb_clone);
-            let completed_counter = Arc::clone(&completed_counter_clone);
             async move {
-                // Attempt to delete the file using libc::unlinkat.
-                // Note: The `filename_cstr` is just the base name; we use AT_EMPTY_PATH from libc.
                 let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
-
                 if result == 0 {
-                    let done_so_far = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                    // Update progress in batches to minimize overhead
-                    if done_so_far % BATCH_SIZE == 0 {
-                        pb.inc(BATCH_SIZE as u64);
-                    }
+                    progress_reporter.inc(1);
                 } else {
                     let e = io::Error::last_os_error();
                     eprintln!(
@@ -306,135 +282,20 @@ async fn run_deletion_tokio<P: ProgressReporter>(
                         filename_cstr.to_string_lossy(),
                         e
                     );
-                    // Exit on the first deletion error
                     std::process::exit(1);
                 }
             }
         })
         .await;
 
-    // Finalize the progress bar for any leftover increments in the last batch
-    let remainder = completed_counter.load(Ordering::Relaxed) % BATCH_SIZE;
-    if remainder > 0 {
-        pb.inc(remainder as u64);
-    }
-
-    // Finish or drop the progress bar.
-    match Arc::try_unwrap(pb) {
-        Ok(bar_inner) => {
-            bar_inner.finish();
-        }
-        Err(_) => {}
-    }
-
-    // Close the directory file descriptor
+    progress_reporter.finish();
     unsafe { libc::close(fd) };
 
     Ok(())
 }
 
 
-fn run_deletion_rayon<P: ProgressReporter>(
-    pattern: &str,
-    thread_pool_size: Option<usize>,
-    batch_size_override: Option<usize>,
-    progress_reporter: P,
-) -> io::Result<()> {
-    // If no thread pool size was given, compute one automatically
-    let concurrency = thread_pool_size.unwrap_or_else(|| compute_optimal_concurrency_rayon(total_files));
-
-    // If no batch size was given, pick a default
-    let batch_size = batch_size_override.unwrap_or(5000);
-
-    println!(
-        "[INFO] Deleting {} files using Rayon with concurrency = {}, batch_size = {} (CPU cores = {})",
-        total_files,
-        concurrency,
-        batch_size,
-        num_cpus::get()
-    );
-
-    // Setup a progress bar
-    let config = Config {
-        throttle_millis: 250,
-        ..Default::default()
-    };
-    let pb = Arc::new(Bar::new(total_files as u64, config));
-
-    // We'll send completed counts in batches to the progress bar thread.
-    let (sender, receiver) = channel::unbounded::<usize>();
-
-    // Spawn a thread to consume batch-completion counts and increment the bar.
-    let pb_thread = std::thread::spawn({
-        let pb = Arc::clone(&pb);
-        move || {
-            let mut total_done = 0;
-            while let Ok(batch_count) = receiver.recv() {
-                total_done += batch_count;
-                pb.inc(batch_count as u64);
-            }
-            // If for some reason we didn't get the last partial batch, account for it here:
-            let remainder = total_files - total_done;
-            if remainder > 0 {
-                pb.inc(remainder as u64);
-            }
-            // We'll finish the bar later (outside this thread).
-        }
-    });
-
-    // Build a custom Rayon thread pool with the desired concurrency.
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(concurrency)
-        .build()
-        .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to build Rayon thread pool: {}", e),
-            )
-        })?;
-
-    // Run the parallel deletion inside that custom pool.
-    pool.install(|| {
-        matched_files.par_chunks(batch_size).for_each(|chunk| {
-            let mut count = 0;
-            for filename_cstr in chunk {
-                let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
-                if result == 0 {
-                    count += 1;
-                } else {
-                    let e = io::Error::last_os_error();
-                    eprintln!(
-                        "Failed to delete '{}': {}",
-                        filename_cstr.to_string_lossy(),
-                        e
-                    );
-                    std::process::exit(1);
-                }
-            }
-            // Send how many were successfully deleted in this chunk.
-            sender.send(count).unwrap();
-        });
-    });
-
-    // Close the sending side, so the progress thread can end
-    drop(sender);
-    pb_thread.join().unwrap();
-
-    // Now we can finish the bar because the thread is done
-    match Arc::try_unwrap(pb) {
-        Ok(bar) => bar.finish(),
-        Err(_) => eprintln!("[WARN] Could not get exclusive ownership of progress bar."),
-    }
-
-    // Close the directory FD
-    unsafe {
-        libc::close(fd);
-    }
-
-    Ok(())
-}
-
-/// Collects matching *filenames* in the given directory using a fast,
+/// Collects matching filenames in the given directory using a fast,
 /// `getdents64`-based approach, then returns `(fd, Vec<CString>)`.
 /// We do not build full paths; we just store the base names of regular files
 /// that match the provided globset. The directory file descriptor (`fd`)
