@@ -181,7 +181,151 @@ fn main() {
     }
 }
 
+/// Main async entry point
+async fn run_deletion_tokio<P: ProgressReporter>(
+    pattern: &str,
+    concurrency_override: Option<usize>,
+    progress_reporter: P,
+    fd: RawFd,
+    matched_files: Vec<CString>,
+) -> io::Result<()> {
+    let total_files = matched_files.len();
+    let concurrency = match concurrency_override {
+        Some(n) => n,
+        None => compute_optimal_concurrency_tokio(total_files),
+    };
+    println!(
+        "[INFO] Deleting {} files with concurrency = {} (CPU cores = {})",
+        total_files,
+        concurrency,
+        num_cpus::get()
+    );
 
+    let file_stream = futures::stream::iter(matched_files.into_iter());
+    file_stream
+        .for_each_concurrent(Some(concurrency), move |filename_cstr| {
+            async move {
+                let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
+                if result == 0 {
+                    progress_reporter.inc(1);
+                } else {
+                    let e = io::Error::last_os_error();
+                    eprintln!(
+                        "Failed to delete '{}': {}",
+                        filename_cstr.to_string_lossy(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
+            }
+        })
+        .await;
+
+    progress_reporter.finish();
+    unsafe { libc::close(fd) };
+
+    Ok(())
+}
+
+fn run_deletion_rayon<P: ProgressReporter>(
+    pattern: &str,
+    thread_pool_size: Option<usize>,
+    batch_size_override: Option<usize>,
+    progress_reporter: P,
+) -> io::Result<()> {
+    // If no thread pool size was given, compute one automatically
+    let concurrency = thread_pool_size.unwrap_or_else(|| compute_optimal_concurrency_rayon(total_files));
+
+    // If no batch size was given, pick a default
+    let batch_size = batch_size_override.unwrap_or(5000);
+
+    println!(
+        "[INFO] Deleting {} files using Rayon with concurrency = {}, batch_size = {} (CPU cores = {})",
+        total_files,
+        concurrency,
+        batch_size,
+        num_cpus::get()
+    );
+
+    // Setup a progress bar
+    let config = Config {
+        throttle_millis: 250,
+        ..Default::default()
+    };
+    let pb = Arc::new(Bar::new(total_files as u64, config));
+
+    // We'll send completed counts in batches to the progress bar thread.
+    let (sender, receiver) = channel::unbounded::<usize>();
+
+    // Spawn a thread to consume batch-completion counts and increment the bar.
+    let pb_thread = std::thread::spawn({
+        let pb = Arc::clone(&pb);
+        move || {
+            let mut total_done = 0;
+            while let Ok(batch_count) = receiver.recv() {
+                total_done += batch_count;
+                pb.inc(batch_count as u64);
+            }
+            // If for some reason we didn't get the last partial batch, account for it here:
+            let remainder = total_files - total_done;
+            if remainder > 0 {
+                pb.inc(remainder as u64);
+            }
+            // We'll finish the bar later (outside this thread).
+        }
+    });
+
+    // Build a custom Rayon thread pool with the desired concurrency.
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(concurrency)
+        .build()
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to build Rayon thread pool: {}", e),
+            )
+        })?;
+
+    // Run the parallel deletion inside that custom pool.
+    pool.install(|| {
+        matched_files.par_chunks(batch_size).for_each(|chunk| {
+            let mut count = 0;
+            for filename_cstr in chunk {
+                let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
+                if result == 0 {
+                    count += 1;
+                } else {
+                    let e = io::Error::last_os_error();
+                    eprintln!(
+                        "Failed to delete '{}': {}",
+                        filename_cstr.to_string_lossy(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
+            }
+            // Send how many were successfully deleted in this chunk.
+            sender.send(count).unwrap();
+        });
+    });
+
+    // Close the sending side, so the progress thread can end
+    drop(sender);
+    pb_thread.join().unwrap();
+
+    // Now we can finish the bar because the thread is done
+    match Arc::try_unwrap(pb) {
+        Ok(bar) => bar.finish(),
+        Err(_) => eprintln!("[WARN] Could not get exclusive ownership of progress bar."),
+    }
+
+    // Close the directory FD
+    unsafe {
+        libc::close(fd);
+    }
+
+    Ok(())
+}
 
 /// Compute the optimal concurrency level
 /// Model: optimal concurrency = e^((1.6063) + (0.6350 * log(CPUs)) - (0.0909 * log((NumFiles + 1))))
@@ -246,53 +390,6 @@ fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>)>> {
 
     Ok(Some((fd, matched_files)))
 }
-
-/// Main async entry point
-async fn run_deletion_tokio<P: ProgressReporter>(
-    pattern: &str,
-    concurrency_override: Option<usize>,
-    progress_reporter: P,
-    fd: RawFd,
-    matched_files: Vec<CString>,
-) -> io::Result<()> {
-    let total_files = matched_files.len();
-    let concurrency = match concurrency_override {
-        Some(n) => n,
-        None => compute_optimal_concurrency_tokio(total_files),
-    };
-    println!(
-        "[INFO] Deleting {} files with concurrency = {} (CPU cores = {})",
-        total_files,
-        concurrency,
-        num_cpus::get()
-    );
-
-    let file_stream = futures::stream::iter(matched_files.into_iter());
-    file_stream
-        .for_each_concurrent(Some(concurrency), move |filename_cstr| {
-            async move {
-                let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
-                if result == 0 {
-                    progress_reporter.inc(1);
-                } else {
-                    let e = io::Error::last_os_error();
-                    eprintln!(
-                        "Failed to delete '{}': {}",
-                        filename_cstr.to_string_lossy(),
-                        e
-                    );
-                    std::process::exit(1);
-                }
-            }
-        })
-        .await;
-
-    progress_reporter.finish();
-    unsafe { libc::close(fd) };
-
-    Ok(())
-}
-
 
 /// Collects matching filenames in the given directory using a fast,
 /// `getdents64`-based approach, then returns `(fd, Vec<CString>)`.
