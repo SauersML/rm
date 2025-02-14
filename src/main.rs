@@ -126,14 +126,14 @@ fn main() {
     };
 
     // Choose a progress reporter based on the total file count.
-    let progress_reporter = if total_files < 1000 {
+    let progress_reporter = if matched_files_number < 1000 {
         NoOpProgressBar::new()
     } else {
         let config = Config {
             throttle_millis: 250,
             ..Default::default()
         };
-        RealProgressBar::new(Arc::new(Bar::new(total_files as u64, config)))
+        RealProgressBar::new(Arc::new(Bar::new(matched_files_number as u64, config)))
     };
 
     match deletion_mode {
@@ -189,14 +189,14 @@ async fn run_deletion_tokio<P: ProgressReporter>(
     fd: RawFd,
     matched_files: Vec<CString>,
 ) -> io::Result<()> {
-    let total_files = matched_files.len();
+    let matched_files_number = matched_files.len();
     let concurrency = match concurrency_override {
         Some(n) => n,
-        None => compute_optimal_concurrency_tokio(total_files),
+        None => compute_optimal_concurrency_tokio(matched_files_number),
     };
     println!(
         "[INFO] Deleting {} files with concurrency = {} (CPU cores = {})",
-        total_files,
+        matched_files_number,
         concurrency,
         num_cpus::get()
     );
@@ -234,14 +234,14 @@ fn run_deletion_rayon<P: ProgressReporter>(
     progress_reporter: P,
 ) -> io::Result<()> {
     // If no thread pool size was given, compute one automatically
-    let concurrency = thread_pool_size.unwrap_or_else(|| compute_optimal_concurrency_rayon(total_files));
+    let concurrency = thread_pool_size.unwrap_or_else(|| compute_optimal_concurrency_rayon(matched_files_number));
 
     // If no batch size was given, pick a default
     let batch_size = batch_size_override.unwrap_or(5000);
 
     println!(
         "[INFO] Deleting {} files using Rayon with concurrency = {}, batch_size = {} (CPU cores = {})",
-        total_files,
+        matched_files_number,
         concurrency,
         batch_size,
         num_cpus::get()
@@ -252,7 +252,7 @@ fn run_deletion_rayon<P: ProgressReporter>(
         throttle_millis: 250,
         ..Default::default()
     };
-    let pb = Arc::new(Bar::new(total_files as u64, config));
+    let pb = Arc::new(Bar::new(matched_files_number as u64, config));
 
     // We'll send completed counts in batches to the progress bar thread.
     let (sender, receiver) = channel::unbounded::<usize>();
@@ -267,7 +267,7 @@ fn run_deletion_rayon<P: ProgressReporter>(
                 pb.inc(batch_count as u64);
             }
             // If for some reason we didn't get the last partial batch, account for it here:
-            let remainder = total_files - total_done;
+            let remainder = matched_files_number - total_done;
             if remainder > 0 {
                 pb.inc(remainder as u64);
             }
