@@ -18,6 +18,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
 use globset::GlobSet;
+use rayon::ThreadPoolBuilder;
 use crossbeam::channel;
 
 lazy_static! {
@@ -69,7 +70,7 @@ fn main() {
             }
         }
         "rayon" => {
-            let result = run_deletion_rayon(pattern, None);
+            let result = run_deletion_rayon(pattern, None, None);
 
             match result {
                 Ok(_) => println!("Files matching '{}' deleted successfully!", pattern),
@@ -120,7 +121,7 @@ async fn run_deletion_tokio(pattern: &str, concurrency_override: Option<usize>) 
     // Compute concurrency (unless an override is given)
     let concurrency = match concurrency_override {
         Some(n) => n,
-        None => compute_optimal_concurrency(total_files),
+        None => compute_optimal_concurrency_tokio(total_files),
     };
     println!(
         "[INFO] Deleting {} files with concurrency = {} (CPU cores = {})",
@@ -197,7 +198,7 @@ async fn run_deletion_tokio(pattern: &str, concurrency_override: Option<usize>) 
 
 /// Compute the optimal concurrency level
 /// Model: optimal concurrency = e^((1.6063) + (0.6350 * log(CPUs)) - (0.0909 * log((NumFiles + 1))))
-fn compute_optimal_concurrency(num_files: usize) -> usize {
+fn compute_optimal_concurrency_tokio(num_files: usize) -> usize {
     let num_files_f = num_files as f64;
 
     // Compute the optimal concurrency using the cached N_CPUS_F
@@ -209,21 +210,33 @@ fn compute_optimal_concurrency(num_files: usize) -> usize {
     candidate
 }
 
-// Batch Size and Thread Pool Size
-fn run_deletion_rayon(pattern: &str, concurrency_override: Option<usize>) -> io::Result<()> {
+fn run_deletion_rayon(
+    pattern: &str,
+    thread_pool_size: Option<usize>,
+    batch_size_override: Option<usize>,
+) -> io::Result<()> {
+    // Split the pattern into directory & filename.
     let (dir_path, file_pattern) = pattern.rsplit_once('/').unwrap_or((".", pattern));
     let dir = Path::new(dir_path);
+
+    // Canonicalize directory
     let canonical_dir = std::fs::canonicalize(dir)?;
 
+    // Build globset
     let mut gs_builder = globset::GlobSetBuilder::new();
     gs_builder.add(
-        globset::Glob::new(file_pattern)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid glob pattern: {}", e)))?,
+        globset::Glob::new(file_pattern).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Invalid glob pattern: {}", e),
+            )
+        })?,
     );
-    let glob_set = gs_builder
-        .build()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e)))?;
+    let glob_set = gs_builder.build().map_err(|e| {
+        io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e))
+    })?;
 
+    // Collect matching files
     let (fd, matched_files) = collect_matching_files(&canonical_dir, &glob_set)?;
     let total_files = matched_files.len();
     if total_files == 0 {
@@ -234,22 +247,31 @@ fn run_deletion_rayon(pattern: &str, concurrency_override: Option<usize>) -> io:
         return Ok(());
     }
 
-    let _concurrency = concurrency_override.unwrap_or_else(|| compute_optimal_concurrency(total_files));
+    // If no thread pool size was given, compute one automatically
+    let concurrency = thread_pool_size.unwrap_or_else(|| compute_optimal_concurrency_rayon(total_files));
+
+    // If no batch size was given, pick a default
+    let batch_size = batch_size_override.unwrap_or(5000);
+
     println!(
-        "[INFO] Deleting {} files (CPU cores = {})",
+        "[INFO] Deleting {} files using Rayon with concurrency = {}, batch_size = {} (CPU cores = {})",
         total_files,
+        concurrency,
+        batch_size,
         num_cpus::get()
     );
 
+    // Setup a progress bar
     let config = Config {
         throttle_millis: 250,
         ..Default::default()
     };
     let pb = Arc::new(Bar::new(total_files as u64, config));
-    const BATCH_SIZE: usize = 5000;
 
+    // We'll send completed counts in batches to the progress bar thread.
     let (sender, receiver) = channel::unbounded::<usize>();
 
+    // Spawn a thread to consume batch-completion counts and increment the bar.
     let pb_thread = std::thread::spawn({
         let pb = Arc::clone(&pb);
         move || {
@@ -258,44 +280,60 @@ fn run_deletion_rayon(pattern: &str, concurrency_override: Option<usize>) -> io:
                 total_done += batch_count;
                 pb.inc(batch_count as u64);
             }
+            // If for some reason we didn't get the last partial batch, account for it here:
             let remainder = total_files - total_done;
             if remainder > 0 {
                 pb.inc(remainder as u64);
             }
-            // Do NOT call pb.finish() here.
+            // We'll finish the bar later (outside this thread).
         }
     });
 
-    use rayon::prelude::*; // Import Rayon's traits
+    // Build a custom Rayon thread pool with the desired concurrency.
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(concurrency)
+        .build()
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to build Rayon thread pool: {}", e),
+            )
+        })?;
 
-    matched_files
-        .par_chunks(BATCH_SIZE)
-        .for_each(|batch| {
-            let sender = sender.clone();
+    // Run the parallel deletion inside that custom pool.
+    pool.install(|| {
+        matched_files.par_chunks(batch_size).for_each(|chunk| {
             let mut count = 0;
-            for filename_cstr in batch {
+            for filename_cstr in chunk {
                 let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
                 if result == 0 {
                     count += 1;
                 } else {
                     let e = io::Error::last_os_error();
-                    eprintln!("Failed to delete '{}': {}", filename_cstr.to_string_lossy(), e);
+                    eprintln!(
+                        "Failed to delete '{}': {}",
+                        filename_cstr.to_string_lossy(),
+                        e
+                    );
                     std::process::exit(1);
                 }
             }
+            // Send how many were successfully deleted in this chunk.
             sender.send(count).unwrap();
         });
+    });
 
+    // Close the sending side, so the progress thread can end
     drop(sender);
     pb_thread.join().unwrap();
 
-    // Finish the progress bar *after* the thread has completed, using try_unwrap.
+    // Now we can finish the bar because the thread is done
     match Arc::try_unwrap(pb) {
-        Ok(bar) => bar.finish(), // We have unique ownership, so we can call finish().
-        Err(_) => eprintln!("[WARN] Could not get exclusive ownership of progress bar."), // Should not happen.
+        Ok(bar) => bar.finish(),
+        Err(_) => eprintln!("[WARN] Could not get exclusive ownership of progress bar."),
     }
 
-
+    // Close the directory FD
     unsafe {
         libc::close(fd);
     }
@@ -2528,6 +2566,87 @@ mod collect_tests {
         );
         // For 100_000 files (around 50_000 matches), expect a very short runtime.
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::{OpenOptions, File};
+    use std::io::Write;
+    use std::time::Instant;
+    use tempfile::TempDir;
+
+    #[test]
+    fn grid_search_rayon() {
+        // CSV file to append results to
+        let csv_path = "rayon_deletion_benchmark.csv";
+
+        // These are the file counts to test
+        let file_counts = [1, 10, 100, 1000, 10_000, 100_000];
+
+        // Thread pool size factors to test (relative to CPU count)
+        let concurrency_factors = [0.5, 1.0, 2.0, 4.0];
+
+        // Various batch sizes to try
+        let batch_sizes = [50, 500, 5_000, 50_000];
+
+        for &fc in &file_counts {
+            // Create a new temporary directory
+            let tmp_dir = TempDir::new().expect("Failed to create temp dir");
+
+            // Generate `fc` files that match our test pattern
+            // We'll call them "testfile_0.tmp", "testfile_1.tmp", etc.
+            for i in 0..fc {
+                let file_path = tmp_dir.path().join(format!("testfile_{}.tmp", i));
+                // Write out a small amount of data
+                std::fs::write(&file_path, b"some test data").unwrap();
+            }
+
+            // The pattern we will pass to run_deletion_rayon
+            // Example: "/tmp/xxxx/testfile_*.tmp"
+            let pattern = format!("{}/testfile_*.tmp", tmp_dir.path().display());
+
+            // For each concurrency factor, for each batch size, measure and record the time.
+            for &factor in &concurrency_factors {
+                // Convert the floating factor to an integer concurrency
+                let concurrency = (factor * (*N_CPUS_F)).ceil() as usize;
+
+                for &bsize in &batch_sizes {
+                    // Start timing
+                    let start = Instant::now();
+
+                    // Run the Rayon-based deletion with the chosen concurrency & batch size
+                    let res = run_deletion_rayon(&pattern, Some(concurrency), Some(bsize));
+
+                    let elapsed = start.elapsed();
+                    // If an error happened, we can fail the test
+                    res.expect("Deletion failed in grid search test");
+
+                    // Append the result to CSV
+                    let mut file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(csv_path)
+                        .expect("Could not open CSV for appending");
+
+                    // CSV format: file_count, time_in_seconds, thread_pool_size, batch_size
+                    // (You can reorder columns if you prefer, but be consistent!)
+                    writeln!(
+                        file,
+                        "{},{},{},{}",
+                        fc,
+                        elapsed.as_secs_f64(),
+                        concurrency,
+                        bsize
+                    )
+                    .expect("Failed to write to CSV");
+                }
+            }
+
+            // Temporary directory and any remaining files are automatically cleaned up
+            // when `tmp_dir` goes out of scope.
+        }
     }
 }
 
