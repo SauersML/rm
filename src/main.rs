@@ -212,11 +212,11 @@ fn compute_optimal_concurrency_rayon(num_files: usize) -> usize {
 }
 
 /// Collects matching filenames from the given directory using `collect_matching_files`.
-/// Returns a tuple of (fd, Vec<CString>, total_count) on success,
+/// Returns a tuple of (fd, Vec<CString>) on success,
 /// or `Ok(None)` if no matching files are found.
 /// The caller is responsible for closing the file descriptor if matches are returned.
 #[inline(always)]
-fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>, usize)>> {
+fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>)>> {
     // Split the pattern into directory & filename parts.
     let (dir_path, file_pattern) = pattern.rsplit_once('/').unwrap_or((".", pattern));
     let dir = Path::new(dir_path);
@@ -235,9 +235,8 @@ fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>, usize
 
     // Collect matching files
     let (fd, matched_files) = collect_matching_files(&canonical_dir, &glob_set)?;
-    let total_files = matched_files.len();
 
-    if total_files == 0 {
+    if matched_files.is_empty() {
         println!("No matching files found for pattern '{}'.", pattern);
         unsafe {
             libc::close(fd);
@@ -245,7 +244,7 @@ fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>, usize
         return Ok(None);
     }
 
-    Ok(Some((fd, matched_files, total_files)))
+    Ok(Some((fd, matched_files)))
 }
 
 /// Main async entry point
