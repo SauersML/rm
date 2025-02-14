@@ -203,7 +203,6 @@ fn main() {
             let result = run_deletion_rayon(
                 None,
                 None,
-                progress_reporter,
                 fd,
                 matched_files,
                 matched_files_number,
@@ -223,7 +222,6 @@ fn main() {
 
 /// Main async entry point
 async fn run_deletion_tokio<P: ProgressReporter + Clone>(
-    pattern: &str,
     concurrency_override: Option<usize>,
     progress_reporter: P,
     fd: RawFd,
@@ -245,19 +243,22 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
     let pr_for_tasks = progress_reporter.clone();
     file_stream
         .for_each_concurrent(Some(concurrency), move |filename_cstr| {
-            async move {
-                let progress_reporter = pr_for_tasks.clone();
-                let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
-                if result == 0 {
-                    progress_reporter.inc(1);
-                } else {
-                    let e = io::Error::last_os_error();
-                    eprintln!(
-                        "Failed to delete '{}': {}",
-                        filename_cstr.to_string_lossy(),
-                        e
-                    );
-                    std::process::exit(1);
+            {
+                let progressReporterValue = pr_for_tasks.clone();
+                async move {
+                    let progress_reporter = progressReporterValue.clone();
+                    let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
+                    if result == 0 {
+                        progress_reporter.inc(1);
+                    } else {
+                        let e = io::Error::last_os_error();
+                        eprintln!(
+                            "Failed to delete '{}': {}",
+                            filename_cstr.to_string_lossy(),
+                            e
+                        );
+                        std::process::exit(1);
+                    }
                 }
             }
         })
@@ -272,7 +273,6 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
 fn run_deletion_rayon<P: ProgressReporter + Clone>(
     thread_pool_size: Option<usize>,
     batch_size_override: Option<usize>,
-    progress_reporter: P,
     fd: RawFd,
     matched_files: Vec<CString>,
     matched_files_number: usize,
