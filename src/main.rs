@@ -2584,8 +2584,9 @@ mod collect_tests {
     }
 }
 
+// cargo test --release -- --nocapture rayon_tune
 #[cfg(test)]
-mod tests {
+mod rayon_tune {
     use super::*;
     use std::fs::{OpenOptions, File};
     use std::io::Write;
