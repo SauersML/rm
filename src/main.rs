@@ -243,9 +243,9 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
     file_stream
         .for_each_concurrent(Some(concurrency), move |filename_cstr| {
             {
-                let progressReporterValue = pr_for_tasks.clone();
+                let progress_reporter_value = pr_for_tasks.clone();
                 async move {
-                    let progress_reporter = progressReporterValue.clone();
+                    let progress_reporter = progress_reporter_value.clone();
                     let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
                     if result == 0 {
                         progress_reporter.inc(1);
