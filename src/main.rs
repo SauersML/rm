@@ -26,6 +26,68 @@ lazy_static! {
     static ref N_CPUS_F: f64 = *N_CPUS as f64;
 }
 
+/// A trait for reporting progress during file deletion.
+/// 
+/// Implementors of this trait provide mechanisms to update progress,
+/// such as incrementing a counter and finalizing the display.
+pub trait ProgressReporter {
+    /// Increment the progress by `n`.
+    fn inc(&self, n: u64);
+
+    /// Finalize the progress reporting (e.g., finish or clear the progress bar).
+    fn finish(&self);
+}
+
+/// A real progress bar that wraps an `Arc<Bar>` from the `progression` crate.
+/// This implementation actually updates the progress bar on each call.
+pub struct RealProgressBar {
+    bar: Arc<Bar>,
+}
+
+impl RealProgressBar {
+    /// Creates a new `RealProgressBar` from an existing `Arc<Bar>`.
+    pub fn new(bar: Arc<Bar>) -> Self {
+        Self { bar }
+    }
+}
+
+impl ProgressReporter for RealProgressBar {
+    #[inline(always)]
+    fn inc(&self, n: u64) {
+        self.bar.inc(n);
+    }
+
+    #[inline(always)]
+    fn finish(&self) {
+        self.bar.finish();
+    }
+}
+
+/// A no-operation progress bar implementation that does nothing.
+/// This is used when no progress reporting is needed, and its methods
+/// are inlined to guarantee zero overhead.
+pub struct NoOpProgressBar;
+
+impl NoOpProgressBar {
+    /// Creates a new `NoOpProgressBar`.
+    #[inline(always)]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl ProgressReporter for NoOpProgressBar {
+    #[inline(always)]
+    fn inc(&self, _n: u64) {
+        // Intentionally left blank for zero overhead.
+    }
+
+    #[inline(always)]
+    fn finish(&self) {
+        // Intentionally left blank for zero overhead.
+    }
+}
+
 /// Synchronous wrapper around the async function.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
