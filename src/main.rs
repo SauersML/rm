@@ -526,6 +526,11 @@ fn collect_matching_files(
 }
 
 // ====================================================================================================================================
+// ====================================================================================================================================
+// ====================================================================================================================================
+// ====================================================================================================================================
+
+
 // cargo test --release -- --nocapture shell_performance
 #[cfg(test)]
 mod shell_performance {
@@ -612,7 +617,9 @@ mod shell_performance {
     fn run_command(command: &str, pattern: &str) -> f64 {
         println!("Executing: {}", command);
         // Force pending I/O to disk before timing
-        Command::new("sync").status().expect("Failed to sync before command");
+        Command::new("sync")
+            .status()
+            .expect("Failed to sync before command");
         let start = Instant::now();
         let output = Command::new("sh")
             .arg("-c")
@@ -627,7 +634,9 @@ mod shell_performance {
             );
         }
         // Force pending I/O to disk after command execution
-        Command::new("sync").status().expect("Failed to sync after command");
+        Command::new("sync")
+            .status()
+            .expect("Failed to sync after command");
         let elapsed = start.elapsed().as_secs_f64();
         // Small delay to allow filesystem metadata to settle
         sleep(Duration::from_millis(100));
@@ -655,7 +664,12 @@ mod shell_performance {
 
     /// Runs a single benchmark iteration for the given command type ("rust" or "system")
     /// and returns the elapsed time in seconds.
-    fn run_single_benchmark(test_name: &str, file_count: usize, command_type: &str, iteration: usize) -> f64 {
+    fn run_single_benchmark(
+        test_name: &str,
+        file_count: usize,
+        command_type: &str,
+        iteration: usize,
+    ) -> f64 {
         // Prepare a fresh, isolated test directory
         let dir_path = prepare_test_directory(test_name, command_type, iteration);
         // Build the glob pattern for matching test files
@@ -718,12 +732,6 @@ mod shell_performance {
         );
     }
 
-    /// Main performance benchmark test that runs four scenarios:
-    ///   1. 1 file
-    ///   2. 100 files
-    ///   3. 25,000 files
-    ///   4. 1,000,000 files
-    ///
     /// Each scenario runs both the Rust binary deletion and the system deletion command over multiple iterations.
     #[test]
     fn benchmark_shell_commands() {
