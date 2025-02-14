@@ -548,7 +548,7 @@ mod shell_performance {
     const ITERATIONS: usize = 5;
 
     // Base directory for test runs (make sure this exists on your system)
-    const BASE_TEST_DIR: &str = "/home/hsiehph/sauer354/tmp_test";
+    const BASE_TEST_DIR: &str = "~/tmp_test";
 
     /// Returns filesystem info (using `df -T`) for the given directory.
     fn get_filesystem_info(dir: &Path) -> String {
@@ -762,7 +762,7 @@ mod t_r_performance {
     const ITERATIONS: usize = 10;
 
     // Base directory for test runs (make sure this exists on your system)
-    const BASE_TEST_DIR: &str = "/home/hsiehph/sauer354/tmp_test";
+    const BASE_TEST_DIR: &str = "~/tmp_test";
 
     /// Returns filesystem info (using `df -T`) for the given directory.
     fn get_filesystem_info(dir: &Path) -> String {
