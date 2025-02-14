@@ -269,7 +269,7 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
     Ok(())
 }
 
-fn run_deletion_rayon<P: ProgressReporter + Clone>(
+fn run_deletion_rayon(
     thread_pool_size: Option<usize>,
     batch_size_override: Option<usize>,
     fd: RawFd,
