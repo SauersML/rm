@@ -96,7 +96,6 @@ fn main() {
         eprintln!("Example: {} 'some_files_*.txt' --tokio", args[0]);
         std::process::exit(1);
     }
-
     let pattern = &args[1];
 
     // Determine deletion mode: default to tokio if not specified.
@@ -113,6 +112,30 @@ fn main() {
         "tokio"
     };
 
+    // Call count_matches to get the file descriptor, matched files, and total count.
+    let (fd, matched_files, total_files) = match count_matches(pattern) {
+        Ok(Some((fd, matched_files, total_files))) => (fd, matched_files, total_files),
+        Ok(None) => {
+            // No matching files found; exit gracefully.
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("Error during file matching: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Choose a progress reporter based on the total file count.
+    let progress_reporter = if total_files < 1000 {
+        NoOpProgressBar::new()
+    } else {
+        let config = Config {
+            throttle_millis: 250,
+            ..Default::default()
+        };
+        RealProgressBar::new(Arc::new(Bar::new(total_files as u64, config)))
+    };
+
     match deletion_mode {
         "tokio" => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -120,7 +143,13 @@ fn main() {
                 .build()
                 .expect("Failed to build Tokio runtime");
 
-            let result = runtime.block_on(run_deletion_tokio(pattern, None));
+            let result = runtime.block_on(run_deletion_tokio(
+                pattern,
+                None,
+                progress_reporter,
+                fd,
+                matched_files,
+            ));
 
             match result {
                 Ok(_) => println!("Files matching '{}' deleted successfully!", pattern),
@@ -131,7 +160,14 @@ fn main() {
             }
         }
         "rayon" => {
-            let result = run_deletion_rayon(pattern, None, None);
+            let result = run_deletion_rayon(
+                pattern,
+                None,
+                None,
+                progress_reporter,
+                fd,
+                matched_files,
+            );
 
             match result {
                 Ok(_) => println!("Files matching '{}' deleted successfully!", pattern),
@@ -144,6 +180,7 @@ fn main() {
         _ => unreachable!(), // We've already validated the deletion_mode.
     }
 }
+
 
 
 /// Compute the optimal concurrency level
