@@ -113,8 +113,8 @@ fn main() {
     };
 
     // Call count_matches to get the file descriptor, matched files, and total count.
-    let (fd, matched_files, total_files) = match count_matches(pattern) {
-        Ok(Some((fd, matched_files, total_files))) => (fd, matched_files, total_files),
+    let (fd, matched_files) = match count_matches(pattern) {
+        Ok(Some((fd, matched_files))) => (fd, matched_files),
         Ok(None) => {
             // No matching files found; exit gracefully.
             std::process::exit(0);
