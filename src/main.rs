@@ -750,7 +750,7 @@ mod shell_performance {
     /// Comprehensive statistics for each approach are printed.
     fn run_benchmark_for_file_count(test_name: &str, file_count: usize) {
         println!("\n===== {}: {} file(s) =====", test_name, file_count);
-        println!("Using base test directory: {}", BASE_TEST_DIR);
+        println!("Using base test directory: {}", base_test_dir().display());
 
         // Benchmark the Rust binary deletion.
         println!("--- Running Rust binary Deletion_Benchmark ---");
@@ -1064,7 +1064,7 @@ mod t_r_performance {
     /// Returns a BenchmarkResult containing mean times, Mann–Whitney U test statistic, p-value, and the winner.
     fn run_benchmark_for_file_count(test_name: &str, file_count: usize) -> BenchmarkResult {
         println!("\n===== {}: {} file(s) =====", test_name, file_count);
-        println!("Using base test directory: {}", BASE_TEST_DIR);
+        println!("Using base test directory: {}", base_test_dir().display());
 
         // Run the Tokio deletion benchmark
         println!("--- Running Tokio Deletion_Benchmark ---");
