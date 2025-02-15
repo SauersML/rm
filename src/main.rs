@@ -603,20 +603,40 @@ mod shell_performance {
 
     /// Verifies that no files matching the provided glob pattern remain.
     ///
-    /// If any matching file is found, the function panics.
+    /// This function checks for any undeleted files that match the given glob pattern. If any are found,
+    /// it prints debugging information including each file's path and then panics.
+    ///
+    /// Panics if any file matching the pattern is found.
     fn verify_no_files(pattern: &str) {
         let mut count = 0;
+        let mut undeleted_files = Vec::new();
+    
+        // Iterate over all entries that match the glob pattern.
         for entry in glob(pattern).expect("Invalid glob pattern") {
-            if let Ok(path) = entry {
-                if path.is_file() {
-                    count += 1;
+            match entry {
+                Ok(path) => {
+                    // If the path is a file, record it.
+                    if path.is_file() {
+                        count += 1;
+                        undeleted_files.push(path);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("DEBUG: Error reading entry: {}", e);
                 }
             }
         }
+    
+        // If any undeleted files are found, output their paths and panic.
         if count > 0 {
+            println!("DEBUG: Found {} undeleted file(s) matching '{}':", count, pattern);
+            for file in undeleted_files {
+                println!("DEBUG: {}", file.display());
+            }
             panic!("Deletion failed: {} file(s) still exist matching {}", count, pattern);
         }
     }
+
 
     /// Executes a shell command (using `sh -c`) and returns the elapsed time in seconds.
     ///
