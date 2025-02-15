@@ -21,14 +21,12 @@ def main():
     df["log_batch_size"] = np.log(df["batch_size"])
 
     # === 2. Build a Quadratic Regression Model for log_time ===
-    # Add quadratic and interaction terms
+    # Add quadratic and interaction terms (removed log_thread_pool_batch and log_file_batch)
     df["log_thread_pool_size_sq"] = df["log_thread_pool_size"] ** 2
     df["log_batch_size_sq"] = df["log_batch_size"] ** 2
-    df["log_thread_pool_batch"] = df["log_thread_pool_size"] * df["log_batch_size"]
     df["log_file_thread_pool"] = df["log_file_count"] * df["log_thread_pool_size"]
-    df["log_file_batch"] = df["log_file_count"] * df["log_batch_size"]
 
-    # Define features and add constant
+    # Define features and add constant (omit removed terms)
     X = df[
         [
             "log_file_count",
@@ -36,9 +34,7 @@ def main():
             "log_batch_size",
             "log_thread_pool_size_sq",
             "log_batch_size_sq",
-            "log_thread_pool_batch",
             "log_file_thread_pool",
-            "log_file_batch",
         ]
     ]
     X = sm.add_constant(X)
@@ -53,36 +49,31 @@ def main():
     # log_time = beta0 + beta1*log_file_count +
     #            beta2*log_thread_pool_size + beta3*log_batch_size +
     #            beta4*(log_thread_pool_size)^2 + beta5*(log_batch_size)^2 +
-    #            beta6*(log_thread_pool_size * log_batch_size) +
-    #            beta7*(log_file_count * log_thread_pool_size) +
-    #            beta8*(log_file_count * log_batch_size)
+    #            beta6*(log_file_count * log_thread_pool_size)
     beta0 = model.params["const"]
     beta1 = model.params["log_file_count"]
     beta2 = model.params["log_thread_pool_size"]
     beta3 = model.params["log_batch_size"]
     beta4 = model.params["log_thread_pool_size_sq"]
     beta5 = model.params["log_batch_size_sq"]
-    beta6 = model.params["log_thread_pool_batch"]
-    beta7 = model.params["log_file_thread_pool"]
-    beta8 = model.params["log_file_batch"]
+    beta6 = model.params["log_file_thread_pool"]
 
     # === 4. Set Up the Convex Optimization Problem ===
     # For a fixed log_file_count (LFC), we optimize over:
     #   x = log_thread_pool_size and y = log_batch_size.
     # Ignoring constant terms, the objective is:
-    # f(x, y) = (beta2 + beta7*LFC)*x + (beta3 + beta8*LFC)*y +
-    #           beta4*x^2 + beta5*y^2 + beta6*x*y
+    # f(x, y) = (beta2 + beta6*LFC)*x + beta3*y + beta4*x^2 + beta5*y^2
     # We express the quadratic part as a quadratic form:
-    # Let Q = [[beta4, beta6/2], [beta6/2, beta5]]
-    Q = np.array([[beta4, beta6 / 2.0],
-                  [beta6 / 2.0, beta5]])
+    # Let Q = [[beta4, 0], [0, beta5]]
+    Q = np.array([[beta4, 0],
+                  [0, beta5]])
 
     def optimize_for_log_file_count(LFC):
         # Define variables: x = log_thread_pool_size, y = log_batch_size
         x = cp.Variable()
         y = cp.Variable()
         # Linear component
-        lin_term = (beta2 + beta7 * LFC) * x + (beta3 + beta8 * LFC) * y
+        lin_term = (beta2 + beta6 * LFC) * x + beta3 * y
         # Quadratic component via quadratic form
         z = cp.vstack([x, y])
         quad_term = cp.quad_form(z, Q)
