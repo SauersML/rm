@@ -546,11 +546,10 @@ mod shell_performance {
 
     // Number of iterations per command
     const ITERATIONS: usize = 5;
-
-    // Base directory for test runs
+    // Base directory used for test runs
     const BASE_TEST_DIR: &str = "~/tmp_test";
 
-    /// Returns filesystem info (using `df -T`) for the given directory.
+    /// Retrieves filesystem information for the given directory using `df -T`.
     fn get_filesystem_info(dir: &Path) -> String {
         let output = Command::new("df")
             .arg("-T")
@@ -561,20 +560,24 @@ mod shell_performance {
     }
 
     /// Prepares a fresh test directory for a single benchmark iteration.
+    ///
     /// The directory will be created at:
     ///   BASE_TEST_DIR/<test_name>_<command_type>_iter<iteration>
     fn prepare_test_directory(test_name: &str, command_type: &str, iteration: usize) -> PathBuf {
         let dir_path = Path::new(BASE_TEST_DIR)
             .join(format!("{}_{}_iter{}", test_name, command_type, iteration));
+
         // Remove the directory if it already exists
         if dir_path.exists() {
             fs::remove_dir_all(&dir_path)
                 .unwrap_or_else(|e| panic!("Failed to remove {}: {}", dir_path.display(), e));
         }
-        // Create the fresh directory
+
+        // Create the new directory
         fs::create_dir_all(&dir_path)
             .unwrap_or_else(|e| panic!("Failed to create {}: {}", dir_path.display(), e));
-        // Report filesystem type/info for transparency
+
+        // Print filesystem information for transparency
         println!(
             "Filesystem info for {}:\n{}",
             dir_path.display(),
@@ -583,21 +586,24 @@ mod shell_performance {
         dir_path
     }
 
-    /// Creates test files (named "test_file_0.dat", "test_file_1.dat", …)
-    /// in the given directory. Each file gets 16 zero bytes.
+    /// Creates test files in the specified directory.
+    ///
+    /// Files are named "test_file_0.dat", "test_file_1.dat", etc., and each file
+    /// contains 16 zero bytes.
     fn create_test_files(dir: &Path, count: usize) {
         for i in 0..count {
-            let path = dir.join(format!("test_file_{}.dat", i));
-            let mut file = File::create(&path)
-                .unwrap_or_else(|e| panic!("Failed to create {}: {}", path.display(), e));
+            let file_path = dir.join(format!("test_file_{}.dat", i));
+            let mut file = File::create(&file_path)
+                .unwrap_or_else(|e| panic!("Failed to create {}: {}", file_path.display(), e));
             let content = vec![0u8; 16];
             file.write_all(&content)
-                .unwrap_or_else(|e| panic!("Failed to write to {}: {}", path.display(), e));
+                .unwrap_or_else(|e| panic!("Failed to write to {}: {}", file_path.display(), e));
         }
     }
 
-    /// Verifies that no files matching the given glob pattern remain.
-    /// Panics if any matching file is found.
+    /// Verifies that no files matching the provided glob pattern remain.
+    ///
+    /// If any matching file is found, the function panics.
     fn verify_no_files(pattern: &str) {
         let mut count = 0;
         for entry in glob(pattern).expect("Invalid glob pattern") {
@@ -612,20 +618,24 @@ mod shell_performance {
         }
     }
 
-    /// Runs the provided shell command (via `sh -c`) and returns the elapsed time in seconds.
-    /// Sync is executed before starting the timer and after the command completes to flush caches.
+    /// Executes a shell command (using `sh -c`) and returns the elapsed time in seconds.
+    ///
+    /// The command execution is sandwiched between calls to `sync` to flush pending I/O.
     fn run_command(command: &str, pattern: &str) -> f64 {
         println!("Executing: {}", command);
-        // Force pending I/O to disk before timing
+
+        // Flush I/O before starting the timer
         Command::new("sync")
             .status()
             .expect("Failed to sync before command");
+
         let start = Instant::now();
         let output = Command::new("sh")
             .arg("-c")
             .arg(command)
             .output()
             .unwrap_or_else(|e| panic!("Failed to execute command `{}`: {}", command, e));
+
         if !output.status.success() {
             panic!(
                 "Command `{}` failed:\n{}",
@@ -633,23 +643,28 @@ mod shell_performance {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        // Force pending I/O to disk after command execution
+
+        // Flush I/O after command execution
         Command::new("sync")
             .status()
             .expect("Failed to sync after command");
+
         let elapsed = start.elapsed().as_secs_f64();
-        // Small delay to allow filesystem metadata to settle
+
+        // Allow filesystem metadata to settle
         sleep(Duration::from_millis(100));
         verify_no_files(pattern);
         elapsed
     }
 
-    /// Calculates statistical metrics (min, max, mean, median, standard deviation) for the provided times.
+    /// Calculates and returns statistical metrics (min, max, mean, median, standard deviation)
+    /// for a list of time values.
     fn calculate_stats(times: &[f64]) -> (f64, f64, f64, f64, f64) {
         let min = times.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let sum: f64 = times.iter().sum();
         let mean = sum / times.len() as f64;
+
         let mut sorted = times.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let median = if sorted.len() % 2 == 0 {
@@ -657,28 +672,36 @@ mod shell_performance {
         } else {
             sorted[sorted.len() / 2]
         };
-        let variance = times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / times.len() as f64;
+
+        let variance = times
+            .iter()
+            .map(|t| (t - mean).powi(2))
+            .sum::<f64>()
+            / times.len() as f64;
         let stddev = variance.sqrt();
         (min, max, mean, median, stddev)
     }
 
-    /// Runs a single benchmark iteration for the given command type ("rust" or "system")
-    /// and returns the elapsed time in seconds.
+    /// Runs a single benchmark iteration.
+    ///
+    /// It prepares a test directory, creates the specified number of files,
+    /// and then runs the deletion command (either using the Rust binary or the system command).
+    /// Returns the elapsed time for the deletion operation.
     fn run_single_benchmark(
         test_name: &str,
         file_count: usize,
         command_type: &str,
         iteration: usize,
     ) -> f64 {
-        // Prepare a fresh, isolated test directory
         let dir_path = prepare_test_directory(test_name, command_type, iteration);
-        // Build the glob pattern for matching test files
+        // The glob pattern used to match the test files (using a short prefix "t")
         let pattern = format!("{}/t*.dat", dir_path.to_string_lossy());
         println!("Creating {} file(s) in {}", file_count, dir_path.display());
         create_test_files(&dir_path, file_count);
-        // Choose the command based on the command type.
-        // For the Rust binary, we assume it's at "target/release/del".
-        // For system deletion, we use `find` for 1M files and `rm` otherwise.
+
+        // Select the deletion command based on the command type.
+        // For the Rust binary, we assume it is located at "target/release/del".
+        // For system deletion, use `find` if 1,000,000 files are present; otherwise use `rm`.
         let command = if command_type == "rust" {
             format!("target/release/del \"{}\"", pattern)
         } else {
@@ -688,6 +711,7 @@ mod shell_performance {
                 format!("rm -f {}/t*.dat", dir_path.to_string_lossy())
             }
         };
+
         let elapsed = run_command(&command, &pattern);
         println!(
             "[{}] Iteration {} ({} files, {} deletion) completed in {:.3} seconds",
@@ -700,16 +724,17 @@ mod shell_performance {
         elapsed
     }
 
-    /// Runs the benchmark for a given test scenario (file count).
-    /// Both the Rust binary deletion and the system deletion command are run over multiple iterations,
-    /// and comprehensive statistics are reported.
+    /// Runs the benchmark for a given file count.
+    ///
+    /// Both the Rust binary deletion and the system deletion commands are executed over multiple iterations.
+    /// Comprehensive statistics for each approach are printed.
     fn run_benchmark_for_file_count(test_name: &str, file_count: usize) {
         println!("\n===== {}: {} file(s) =====", test_name, file_count);
         println!("Using base test directory: {}", BASE_TEST_DIR);
 
-        // Run the Rust binary Deletion_Benchmark
+        // Benchmark the Rust binary deletion
         println!("--- Running Rust binary Deletion_Benchmark ---");
-        let mut rust_times = Vec::new();
+        let mut rust_times = Vec::with_capacity(ITERATIONS);
         for iter in 0..ITERATIONS {
             rust_times.push(run_single_benchmark(test_name, file_count, "rust", iter));
         }
@@ -719,9 +744,9 @@ mod shell_performance {
             test_name, min_r, max_r, mean_r, median_r, stddev_r
         );
 
-        // Run the system Deletion_Benchmark
+        // Benchmark the system deletion command
         println!("--- Running system Deletion_Benchmark ---");
-        let mut system_times = Vec::new();
+        let mut system_times = Vec::with_capacity(ITERATIONS);
         for iter in 0..ITERATIONS {
             system_times.push(run_single_benchmark(test_name, file_count, "system", iter));
         }
@@ -732,7 +757,8 @@ mod shell_performance {
         );
     }
 
-    /// Each scenario runs both the Rust binary deletion and the system deletion command over multiple iterations.
+    /// Executes the full benchmark suite by running both deletion methods
+    /// across multiple file count scenarios.
     #[test]
     fn benchmark_shell_commands() {
         println!("=== Starting Shell Command Benchmarks ===");
@@ -743,6 +769,7 @@ mod shell_performance {
         println!("=== Benchmarks Complete ===");
     }
 }
+
 
 
 // cargo test --release -- --nocapture t_r_performance
