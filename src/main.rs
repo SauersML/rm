@@ -547,7 +547,10 @@ mod shell_performance {
     // Number of iterations per command
     const ITERATIONS: usize = 5;
     // Base directory used for test runs
-    const BASE_TEST_DIR: &str = "~/tmp_test";
+    fn base_test_dir() -> std::path::PathBuf {
+        let home = std::env::var("HOME").expect("HOME environment variable not set");
+        std::path::PathBuf::from(home).join("tmp_test")
+    }
 
     /// Retrieves filesystem information for the given directory using `df -T`.
     fn get_filesystem_info(dir: &Path) -> String {
@@ -564,7 +567,7 @@ mod shell_performance {
     /// The directory will be created at:
     ///   BASE_TEST_DIR/<test_name>_<command_type>_iter<iteration>
     fn prepare_test_directory(test_name: &str, command_type: &str, iteration: usize) -> PathBuf {
-        let dir_path = Path::new(BASE_TEST_DIR)
+        let dir_path = base_test_dir()
             .join(format!("{}_{}_iter{}", test_name, command_type, iteration));
 
         // Remove the directory if it already exists.
