@@ -1492,7 +1492,6 @@ mod performance_tests {
 #[cfg(test)]
 mod test_grid {
     use super::{count_matches, run_deletion_tokio, NoOpProgressBar, Progress};
-    use std::ffi::CString;
     use std::fs::{File, OpenOptions};
     use std::io::{BufWriter, Write};
     use std::path::{Path, PathBuf};
