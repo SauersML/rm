@@ -546,10 +546,11 @@ mod shell_performance {
 
     // Number of iterations per command
     const ITERATIONS: usize = 5;
-    // Base directory used for test runs
-    fn base_test_dir() -> std::path::PathBuf {
+
+    /// Returns the base test directory (e.g., "$HOME/tmp_test").
+    fn base_test_dir() -> PathBuf {
         let home = std::env::var("HOME").expect("HOME environment variable not set");
-        std::path::PathBuf::from(home).join("tmp_test")
+        PathBuf::from(home).join("tmp_test")
     }
 
     /// Retrieves filesystem information for the given directory using `df -T`.
@@ -563,12 +564,10 @@ mod shell_performance {
     }
 
     /// Prepares a fresh test directory for a single benchmark iteration.
-    ///
     /// The directory will be created at:
     ///   BASE_TEST_DIR/<test_name>_<command_type>_iter<iteration>
     fn prepare_test_directory(test_name: &str, command_type: &str, iteration: usize) -> PathBuf {
-        let dir_path = base_test_dir()
-            .join(format!("{}_{}_iter{}", test_name, command_type, iteration));
+        let dir_path = base_test_dir().join(format!("{}_{}_iter{}", test_name, command_type, iteration));
 
         // Remove the directory if it already exists.
         if dir_path.exists() {
@@ -605,18 +604,14 @@ mod shell_performance {
     }
 
     /// Verifies that no files matching the provided glob pattern remain.
-    ///
-    /// This function checks for any undeleted files that match the given glob pattern.
-    /// If any are found, it prints debugging information including each file's path and then panics.
+    /// If any undeleted files are found, it prints debugging information and panics.
     fn verify_no_files(pattern: &str) {
         let mut count = 0;
         let mut undeleted_files = Vec::new();
 
-        // Iterate over all entries that match the glob pattern.
         for entry in glob(pattern).expect("Invalid glob pattern") {
             match entry {
                 Ok(path) => {
-                    // If the path is a file, record it.
                     if path.is_file() {
                         count += 1;
                         undeleted_files.push(path);
@@ -628,7 +623,6 @@ mod shell_performance {
             }
         }
 
-        // If any undeleted files are found, output their paths and panic.
         if count > 0 {
             println!("DEBUG: Found {} undeleted file(s) matching '{}':", count, pattern);
             for file in undeleted_files {
@@ -640,21 +634,24 @@ mod shell_performance {
 
     /// Executes a shell command (using `sh -c`) and returns the elapsed time in seconds.
     ///
-    /// The command execution is sandwiched between calls to `sync` to flush pending I/O.
+    /// This function performs all setup (pre-sync) and teardown (post-sync, sleep, verification)
+    /// outside of the timed region. Only the actual execution of the command is timed.
     fn run_command(command: &str, pattern: &str) -> f64 {
         println!("Executing: {}", command);
 
-        // Flush I/O before starting the timer.
+        // Pre-command: flush I/O (setup; not timed)
         Command::new("sync")
             .status()
             .expect("Failed to sync before command");
 
+        // Start timing just before executing the command.
         let start = Instant::now();
         let output = Command::new("sh")
             .arg("-c")
             .arg(command)
             .output()
             .unwrap_or_else(|e| panic!("Failed to execute command `{}`: {}", command, e));
+        let command_elapsed = start.elapsed();
 
         if !output.status.success() {
             panic!(
@@ -664,21 +661,18 @@ mod shell_performance {
             );
         }
 
-        // Flush I/O after command execution.
+        // Post-command: flush I/O, wait for metadata to settle, and verify deletion (not timed)
         Command::new("sync")
             .status()
             .expect("Failed to sync after command");
-
-        let elapsed = start.elapsed().as_secs_f64();
-
-        // Allow filesystem metadata to settle.
         sleep(Duration::from_millis(100));
         verify_no_files(pattern);
-        elapsed
+
+        // Return only the command execution time.
+        command_elapsed.as_secs_f64()
     }
 
-    /// Calculates and returns statistical metrics (min, max, mean, median, standard deviation)
-    /// for a list of time values.
+    /// Calculates statistical metrics (min, max, mean, median, stddev) for the provided time values.
     fn calculate_stats(times: &[f64]) -> (f64, f64, f64, f64, f64) {
         let min = times.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -693,20 +687,15 @@ mod shell_performance {
             sorted[sorted.len() / 2]
         };
 
-        let variance = times
-            .iter()
-            .map(|t| (t - mean).powi(2))
-            .sum::<f64>()
-            / times.len() as f64;
+        let variance = times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / times.len() as f64;
         let stddev = variance.sqrt();
         (min, max, mean, median, stddev)
     }
 
     /// Runs a single benchmark iteration.
     ///
-    /// It prepares a test directory, creates the specified number of files,
-    /// and then runs the deletion command (either using the Rust binary or the system command).
-    /// Returns the elapsed time for the deletion operation.
+    /// This function sets up the test directory, creates the test files, and then
+    /// times the deletion command—isolating the measurement strictly to the command's execution.
     fn run_single_benchmark(
         test_name: &str,
         file_count: usize,
@@ -714,14 +703,12 @@ mod shell_performance {
         iteration: usize,
     ) -> f64 {
         let dir_path = prepare_test_directory(test_name, command_type, iteration);
-        // The glob pattern used to match the test files (using a short prefix "t")
+        // Build the glob pattern to match test files.
         let pattern = format!("{}/t*.dat", dir_path.to_string_lossy());
         println!("Creating {} file(s) in {}", file_count, dir_path.display());
         create_test_files(&dir_path, file_count);
 
-        // Select the deletion command based on the command type.
-        // For the Rust binary, we assume it is located at "target/release/del".
-        // For system deletion, use `find` if 1,000,000 files are present; otherwise use `rm`.
+        // Determine the deletion command.
         let command = if command_type == "rust" {
             format!("target/release/del \"{}\"", pattern)
         } else {
@@ -732,6 +719,7 @@ mod shell_performance {
             }
         };
 
+        // Time only the command execution.
         let elapsed = run_command(&command, &pattern);
         println!(
             "[{}] Iteration {} ({} files, {} deletion) completed in {:.3} seconds",
@@ -746,8 +734,8 @@ mod shell_performance {
 
     /// Runs the benchmark for a given file count.
     ///
-    /// Both the Rust binary deletion and the system deletion commands are executed over multiple iterations.
-    /// Comprehensive statistics for each approach are printed.
+    /// This function executes both the Rust binary deletion and the system deletion commands
+    /// over multiple iterations and then prints comprehensive statistics.
     fn run_benchmark_for_file_count(test_name: &str, file_count: usize) {
         println!("\n===== {}: {} file(s) =====", test_name, file_count);
         println!("Using base test directory: {}", base_test_dir().display());
