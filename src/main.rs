@@ -1494,14 +1494,15 @@ mod performance_tests {
 // cargo test --release -- --nocapture test_grid
 #[cfg(test)]
 mod test_grid {
-    use super::*;
-    use std::fs::File;
-    use std::io::Write;
+    use super::{count_matches, run_deletion_tokio, NoOpProgressBar, Progress};
+    use std::ffi::CString;
+    use std::fs::{File, OpenOptions};
+    use std::io::{BufWriter, Write};
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
-    use std::fs::OpenOptions;
-    use std::io::BufWriter;
+    use tokio::runtime::Builder;
+    use glob;
 
     const TEST_FILE_SIZE_KB: usize = 1;
     const CSV_FILE_NAME: &str = "test_results.csv";
@@ -1512,13 +1513,14 @@ mod test_grid {
         for i in 0..count {
             let file_path = dir.join(format!("test_file_{}.dat", i));
             let mut file = File::create(&file_path).unwrap();
-            file.write_all(&vec![0u8; TEST_FILE_SIZE_KB * 1024]).unwrap();
+            file.write_all(&vec![0u8; TEST_FILE_SIZE_KB * 1024])
+                .unwrap();
             paths.push(file_path);
         }
         paths
     }
 
-    /// Generates logarithmically spaced values between 1 and max_val, including max_val.
+    /// Generates logarithmically spaced values between 1 and max_val (inclusive).
     fn generate_log_space(max_val: usize, num_points: usize) -> Vec<usize> {
         let max_val_f64 = max_val as f64;
         let log_max = max_val_f64.log10();
@@ -1551,29 +1553,52 @@ mod test_grid {
             .expect("Failed to open CSV file");
         let mut csv_writer = BufWriter::new(csv_file);
         if csv_writer.get_ref().metadata().unwrap().len() == 0 {
-            writeln!(csv_writer, "SimulatedCPUs,NumFiles,Concurrency,TotalTime(ns)").expect("Failed to write CSV header");
+            writeln!(
+                csv_writer,
+                "SimulatedCPUs,NumFiles,Concurrency,TotalTime(ns)"
+            )
+            .expect("Failed to write CSV header");
         }
         for &simulated_cpus in &simulated_cpu_counts {
             let num_threads = simulated_cpus.min(actual_cpus);
-            let runtime = tokio::runtime::Builder::new_multi_thread()
+            let runtime = Builder::new_multi_thread()
                 .enable_all()
                 .worker_threads(num_threads)
                 .build()
                 .unwrap();
             for &num_files in &file_counts {
+                // Create a temporary directory for this test iteration.
                 let tmp_dir = tempdir().unwrap();
                 let pattern = format!("{}/*", tmp_dir.path().to_string_lossy());
                 let mut min_time = Duration::MAX;
                 let mut optimal_concurrency = 1;
 
-                // Generate log-spaced concurrency levels from 1 to max_concurrency
+                // Generate log‑spaced concurrency levels from 1 to max_concurrency.
                 let max_concurrency = max_concurrency_multiplier * simulated_cpus;
                 let concurrency_levels = generate_log_space(max_concurrency, 32);
 
                 for concurrency in concurrency_levels {
+                    // (Re)create test files.
                     create_test_files(tmp_dir.path(), num_files);
                     let start = Instant::now();
-                    runtime.block_on(run_deletion_tokio(&pattern, Some(concurrency))).unwrap();
+                    // Obtain the directory file descriptor and matching file names.
+                    let (fd, matched_files) = match count_matches(&pattern).unwrap() {
+                        Some((fd, files)) => (fd, files),
+                        None => continue,
+                    };
+                    let num_matches = matched_files.len();
+                    // Use a no‑op progress reporter.
+                    let progress = Progress::NoOp(NoOpProgressBar::new());
+                    // Call the deletion routine with the proper arguments.
+                    runtime
+                        .block_on(run_deletion_tokio(
+                            Some(concurrency),
+                            progress,
+                            fd,
+                            matched_files,
+                            num_matches,
+                        ))
+                        .unwrap();
                     let elapsed = start.elapsed();
                     println!(
                         "  Simulated CPUs: {}, Files: {}, Concurrency: {}, Time: {:?}",
@@ -1586,7 +1611,8 @@ mod test_grid {
                         num_files,
                         concurrency,
                         elapsed.as_nanos()
-                    ).expect("Failed to write to CSV");
+                    )
+                    .expect("Failed to write to CSV");
                     if elapsed < min_time {
                         min_time = elapsed;
                         optimal_concurrency = concurrency;
@@ -1604,10 +1630,12 @@ mod test_grid {
                 );
             }
         }
-        println!("[Grid Search Test] Complete.  See {}", CSV_FILE_NAME);
+        println!(
+            "[Grid Search Test] Complete.  See {} for results.",
+            CSV_FILE_NAME
+        );
     }
 }
-
 
 
 
