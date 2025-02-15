@@ -1127,11 +1127,9 @@ mod t_r_performance {
 // cargo test --release -- --nocapture performance_tests
 #[cfg(test)]
 mod performance_tests {
-    use super::*;
     use std::{
         fs::{self, File},
         io::Write,
-        os::unix::io::RawFd,
         path::{Path, PathBuf},
         process::Command,
         time::Instant,
@@ -1141,7 +1139,6 @@ mod performance_tests {
     use glob;
 
     use super::{count_matches, run_deletion_tokio, NoOpProgressBar, Progress};
-    use std::ffi::CString;
 
     /// Creates test files in `dir` using a standard naming scheme (e.g. "test_file_0.dat").
     fn create_test_files(dir: &Path, count: usize, size_kb: usize) -> Vec<PathBuf> {
@@ -1404,7 +1401,7 @@ mod performance_tests {
         );
     }
 
-    /// Test to ensure that directories are not removed during deletion.
+    /// Test to make sure that directories are not removed during deletion.
     #[test]
     fn test_skips_directories() {
         println!("\n--- Test: Skipping Directories ---");
@@ -1430,7 +1427,7 @@ mod performance_tests {
         assert!(!file_path.exists(), "File was not deleted!");
     }
 
-    /// Test to ensure that when the deletion pattern only matches some files,
+    /// Test to make sure that when the deletion pattern only matches some files,
     /// only the matching files are removed while non‑matching files remain.
     #[test]
     fn test_partial_match_deletion() {
@@ -1502,7 +1499,6 @@ mod test_grid {
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
     use tokio::runtime::Builder;
-    use glob;
 
     const TEST_FILE_SIZE_KB: usize = 1;
     const CSV_FILE_NAME: &str = "test_results.csv";
@@ -2499,7 +2495,7 @@ mod collect_tests {
 // cargo test --release -- --nocapture rayon_tune
 #[cfg(test)]
 mod rayon_tune {
-    use super::*;
+    use super::{count_matches, run_deletion_rayon, N_CPUS_F};
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::time::Instant;
@@ -2548,14 +2544,32 @@ mod rayon_tune {
                         tmp_dir.path().display()
                     );
 
+                    // Before deletion, obtain the file descriptor and matching file list.
+                    let (fd, matched_files) = match count_matches(&pattern).unwrap() {
+                        Some((fd, files)) => (fd, files),
+                        None => {
+                            println!("No matching files found for pattern: {}", pattern);
+                            continue;
+                        }
+                    };
+                    let num_matches = matched_files.len();
+
                     // Start timing the deletion.
                     let start = Instant::now();
 
                     // Run the Rayon-based deletion with the chosen concurrency and batch size.
-                    let res = run_deletion_rayon(&pattern, Some(concurrency), Some(bsize));
+                    // Note that run_deletion_rayon takes 5 arguments:
+                    // thread_pool_size, batch_size_override, fd, matched_files, matched_files_number.
+                    let res = run_deletion_rayon(
+                        Some(concurrency),
+                        Some(bsize),
+                        fd,
+                        matched_files,
+                        num_matches,
+                    );
 
                     let elapsed = start.elapsed();
-                    // Ensure deletion succeeded.
+                    // Make sure deletion succeeded.
                     res.expect("Deletion failed in grid search test");
 
                     // Append the test result to the CSV file.
@@ -2575,11 +2589,12 @@ mod rayon_tune {
                         bsize
                     )
                     .expect("Failed to write to CSV");
-                    // `tmp_dir` is dropped here and cleaned up.
+                    // tmp_dir is dropped here and its contents are cleaned up.
                 }
             }
         }
     }
 }
+
 
 // cargo test --release -- --nocapture
