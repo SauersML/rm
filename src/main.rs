@@ -547,7 +547,7 @@ mod shell_performance {
     // Number of iterations per command
     const ITERATIONS: usize = 5;
 
-    // Base directory for test runs (make sure this exists on your system)
+    // Base directory for test runs
     const BASE_TEST_DIR: &str = "~/tmp_test";
 
     /// Returns filesystem info (using `df -T`) for the given directory.
@@ -761,7 +761,7 @@ mod t_r_performance {
     // Number of iterations per command
     const ITERATIONS: usize = 10;
 
-    // Base directory for test runs (make sure this exists on your system)
+    // Base directory for test runs
     const BASE_TEST_DIR: &str = "~/tmp_test";
 
     /// Returns filesystem info (using `df -T`) for the given directory.
