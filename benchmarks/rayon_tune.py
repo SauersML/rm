@@ -3,10 +3,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import statsmodels.api as sm
-from matplotlib.colors import LinearSegmentedColormap
+import cvxpy as cp
 
 def main():
-    # Load data (no header in CSV)
+    # === Load and Prepare Data ===
+    # Load CSV data (no header) and assign column names
     df = pd.read_csv(
         "rayon_deletion_benchmark.csv",
         header=None,
@@ -19,81 +20,127 @@ def main():
     df["log_thread_pool_size"] = np.log(df["thread_pool_size"])
     df["log_batch_size"] = np.log(df["batch_size"])
 
-    # For each file_count, select the row with the minimum time_in_seconds (optimal combo)
-    optimal_idx = df.groupby("file_count")["time_in_seconds"].idxmin()
-    optimal_mask = df.index.isin(optimal_idx)
-    non_optimal_mask = ~optimal_mask
+    # === Build a Predictive Quadratic Model for log_time ===
+    # Include quadratic terms and interaction terms between the log variables.
+    df["log_thread_pool_size_sq"] = df["log_thread_pool_size"] ** 2
+    df["log_batch_size_sq"] = df["log_batch_size"] ** 2
+    df["log_thread_pool_batch"] = df["log_thread_pool_size"] * df["log_batch_size"]
 
-    # For non-optimal points, normalize colors based on log(time)
-    non_optimal_time = df.loc[non_optimal_mask, "time_in_seconds"]
-    log_non_optimal_time = np.log(non_optimal_time)
-    norm = (log_non_optimal_time - log_non_optimal_time.min()) / (
-        log_non_optimal_time.max() - log_non_optimal_time.min()
-    )
-    custom_cmap = LinearSegmentedColormap.from_list("custom_cmap", ["orange", "yellow", "blue"])
-    non_optimal_colors = custom_cmap(norm)
+    # Include interactions between log_file_count and the other two variables,
+    # so that the optimal settings can vary with file count.
+    df["log_file_thread_pool"] = df["log_file_count"] * df["log_thread_pool_size"]
+    df["log_file_batch"] = df["log_file_count"] * df["log_batch_size"]
 
-    # 3D Scatter Plot:
-    # Axes: x = log(batch_size), y = log(thread_pool_size), z = log(file_count)
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection="3d")
+    # Define the regression features and add a constant
+    X = df[
+        [
+            "log_file_count",
+            "log_thread_pool_size",
+            "log_batch_size",
+            "log_thread_pool_size_sq",
+            "log_batch_size_sq",
+            "log_thread_pool_batch",
+            "log_file_thread_pool",
+            "log_file_batch",
+        ]
+    ]
+    X = sm.add_constant(X)
+    y = df["log_time"]
 
-    # Plot non-optimal points (alpha to de-emphasize)
-    ax.scatter(
-        df.loc[non_optimal_mask, "log_batch_size"],
-        df.loc[non_optimal_mask, "log_thread_pool_size"],
-        df.loc[non_optimal_mask, "log_file_count"],
-        c=non_optimal_colors,
-        marker="o",
-        alpha=0.1,
-        label="Non-Optimal",
-    )
-
-    # Plot optimal points in red
-    ax.scatter(
-        df.loc[optimal_mask, "log_batch_size"],
-        df.loc[optimal_mask, "log_thread_pool_size"],
-        df.loc[optimal_mask, "log_file_count"],
-        c="red",
-        marker="o",
-        label="Optimal (Lowest time)",
-    )
-
-    # ---- Regression on Optimal Points ----
-    # Model: log(thread_pool_size) ~ log(batch_size) + log(file_count)
-    optimal_data = df.loc[optimal_mask]
-    X = optimal_data[["log_batch_size", "log_file_count"]]
-    y = optimal_data["log_thread_pool_size"]
-    X_const = sm.add_constant(X)
-    model = sm.OLS(y, X_const).fit()
+    # Fit the quadratic regression model
+    model = sm.OLS(y, X).fit()
     print(model.summary())
 
-    # Draw a regression line: fix log(file_count) at its median, vary log(batch_size)
-    fixed_log_file_count = optimal_data["log_file_count"].median()
-    log_batch_range = np.linspace(
-        optimal_data["log_batch_size"].min(), optimal_data["log_batch_size"].max(), 100
-    )
-    X_pred = pd.DataFrame({
-        "const": 1,
-        "log_batch_size": log_batch_range,
-        "log_file_count": fixed_log_file_count,
-    })
-    predicted_log_thread_pool = model.predict(X_pred)
+    # === Extract Model Coefficients ===
+    # Our model is:
+    # log_time = beta0 + beta1*log_file_count
+    #          + beta2*log_thread_pool_size + beta3*log_batch_size
+    #          + beta4*(log_thread_pool_size)^2 + beta5*(log_batch_size)^2
+    #          + beta6*(log_thread_pool_size*log_batch_size)
+    #          + beta7*(log_file_count*log_thread_pool_size)
+    #          + beta8*(log_file_count*log_batch_size)
+    beta0 = model.params["const"]
+    beta1 = model.params["log_file_count"]
+    beta2 = model.params["log_thread_pool_size"]
+    beta3 = model.params["log_batch_size"]
+    beta4 = model.params["log_thread_pool_size_sq"]
+    beta5 = model.params["log_batch_size_sq"]
+    beta6 = model.params["log_thread_pool_batch"]
+    beta7 = model.params["log_file_thread_pool"]
+    beta8 = model.params["log_file_batch"]
 
-    # Plot the regression line (line in 3D at fixed log(file_count))
+    # === Set Up the Convex Optimization Problem ===
+    # For a fixed log_file_count (denoted LFC), the model becomes:
+    # log_time = (beta0 + beta1*LFC) +
+    #            (beta2 + beta7*LFC)*x + (beta3 + beta8*LFC)*y +
+    #            beta4*x^2 + beta5*y^2 + beta6*x*y,
+    # where x = log_thread_pool_size and y = log_batch_size.
+    # Since the constant term doesn't affect the minimization, the effective
+    # objective (in x and y) is:
+    #   f(x,y) = (beta2 + beta7*LFC)*x + (beta3 + beta8*LFC)*y + beta4*x^2 + beta5*y^2 + beta6*x*y.
+    #
+    # Thread_pool_size and batch_size are ≥1
+    def optimize_for_log_file_count(LFC):
+        x = cp.Variable()  # log_thread_pool_size
+        y = cp.Variable()  # log_batch_size
+        # Define the objective function (ignoring constant terms independent of x,y)
+        obj = ((beta2 + beta7 * LFC) * x +
+               (beta3 + beta8 * LFC) * y +
+               beta4 * cp.square(x) +
+               beta5 * cp.square(y) +
+               beta6 * x * y)
+        objective = cp.Minimize(obj)
+        constraints = [x >= 0, y >= 0]
+        prob = cp.Problem(objective, constraints)
+        prob.solve()
+        return x.value, y.value
+
+    # === Solve for the Optimal Configuration for a Range of log_file_count Values ===
+    LFC_values = np.linspace(df["log_file_count"].min(), df["log_file_count"].max(), 50)
+    optimal_log_thread_pool = []  # will store optimal x values
+    optimal_log_batch = []         # will store optimal y values
+    for LFC in LFC_values:
+        opt_x, opt_y = optimize_for_log_file_count(LFC)
+        optimal_log_thread_pool.append(opt_x)
+        optimal_log_batch.append(opt_y)
+
+    # === Plotting ===
+    # We'll create a 3D scatter plot of the original data points along with
+    # the optimal configuration curve (in red) as a function of log_file_count.
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Plot original data points (using log_batch_size as x, log_thread_pool_size as y,
+    # and log_file_count as z)
+    ax.scatter(
+        df["log_batch_size"],
+        df["log_thread_pool_size"],
+        df["log_file_count"],
+        c="gray",
+        marker="o",
+        alpha=0.3,
+        label="Data Points",
+    )
+
+    # Plot the optimal curve. Our optimizer returns:
+    #   x = log_thread_pool_size, y = log_batch_size.
+    # When plotting, we use:
+    #   x-axis: log(batch_size)  (optimal_log_batch)
+    #   y-axis: log(thread_pool_size) (optimal_log_thread_pool)
+    #   z-axis: log(file_count) (LFC_values)
     ax.plot(
-        log_batch_range,
-        predicted_log_thread_pool,
-        np.full_like(log_batch_range, fixed_log_file_count),
-        color="green",
-        linewidth=2,
-        label="Best Fit: log(thread_pool_size)",
+        optimal_log_batch,
+        optimal_log_thread_pool,
+        LFC_values,
+        color="red",
+        linewidth=3,
+        label="Optimal Configuration",
     )
 
     ax.set_xlabel("log(Batch Size)")
     ax.set_ylabel("log(Thread Pool Size)")
     ax.set_zlabel("log(File Count)")
-    ax.set_title("3D Scatter: Log-Transformed Variables\nOptimal Points & Regression Line")
+    ax.set_title("Optimal Configuration: Minimizing log(Time)")
     ax.legend()
     plt.tight_layout()
     plt.show()
