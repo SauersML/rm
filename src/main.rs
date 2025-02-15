@@ -1131,12 +1131,17 @@ mod performance_tests {
     use std::{
         fs::{self, File},
         io::Write,
+        os::unix::io::RawFd,
         path::{Path, PathBuf},
         process::Command,
         time::Instant,
     };
     use tempfile::tempdir;
     use tokio::runtime::Builder;
+    use glob;
+
+    use super::{count_matches, run_deletion_tokio, NoOpProgressBar, Progress};
+    use std::ffi::CString;
 
     /// Creates test files in `dir` using a standard naming scheme (e.g. "test_file_0.dat").
     fn create_test_files(dir: &Path, count: usize, size_kb: usize) -> Vec<PathBuf> {
@@ -1150,7 +1155,7 @@ mod performance_tests {
         file_paths
     }
 
-    /// Converts a given number into a minimal base-36 string.
+    /// Converts a given number into a minimal base‑36 string.
     fn to_base36(mut num: usize) -> String {
         const BASE36: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
         if num == 0 {
@@ -1177,19 +1182,40 @@ mod performance_tests {
         file_paths
     }
 
-    /// Runs the Rust deletion routine for files matching `pattern`.
-    /// Returns the elapsed time (in seconds) and makes sure no matching files remain.
+    /// Runs the Rust deletion routine for files matching `pattern` using run_deletion_tokio.
+    /// It uses `count_matches` to open the directory and gather matching file names,
+    /// then calls the deletion routine with a No‑op progress reporter.
+    /// Returns the elapsed time (in seconds) and verifies that no matching files remain.
     fn measure_rust_deletion(pattern: &str) -> f64 {
         let start = Instant::now();
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
-        let result = rt.block_on(run_deletion_tokio(pattern, None));
+
+        // Get the directory FD and matching files.
+        let (fd, matched_files) = match count_matches(pattern).unwrap() {
+            Some((fd, files)) => (fd, files),
+            None => {
+                // If there are no matches, nothing to delete.
+                return start.elapsed().as_secs_f64();
+            }
+        };
+        let matched_files_number = matched_files.len();
+
+        // Use a No‑op progress reporter.
+        let progress = Progress::NoOp(NoOpProgressBar::new());
+        let result = rt.block_on(run_deletion_tokio(
+            None,
+            progress,
+            fd,
+            matched_files,
+            matched_files_number,
+        ));
         let elapsed = start.elapsed().as_secs_f64();
 
         if let Err(e) = result {
             panic!("Error during Rust deletion: {}", e);
         }
 
-        // Verify that no matching files are left.
+        // Verify that no matching files remain.
         let remaining: Vec<_> = glob::glob(pattern)
             .unwrap()
             .filter_map(Result::ok)
@@ -1219,7 +1245,10 @@ mod performance_tests {
                 .output()
                 .expect("Failed to execute find command");
             if !output.status.success() {
-                eprintln!("find command stderr: {}", String::from_utf8_lossy(&output.stderr));
+                eprintln!(
+                    "find command stderr: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
             (start.elapsed().as_secs_f64(), cmd)
         } else {
@@ -1231,12 +1260,15 @@ mod performance_tests {
                 .output()
                 .expect("Failed to execute rm command");
             if !output.status.success() {
-                eprintln!("rm command stderr: {}", String::from_utf8_lossy(&output.stderr));
+                eprintln!(
+                    "rm command stderr: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
             (start.elapsed().as_secs_f64(), cmd)
         };
 
-        // Make sure no matching files remain.
+        // Verify that no matching files remain.
         let remaining: Vec<_> = glob::glob(pattern)
             .unwrap()
             .filter_map(Result::ok)
@@ -1248,7 +1280,7 @@ mod performance_tests {
         (elapsed, cmd)
     }
 
-    /// Formats a duration (in seconds) into a human-readable string.
+    /// Formats a duration (in seconds) into a human‑readable string.
     /// Uses milliseconds if the duration is less than one second.
     fn format_duration(seconds: f64) -> String {
         if seconds < 1.0 {
@@ -1299,7 +1331,10 @@ mod performance_tests {
 
         // Recreate files for the system deletion test.
         create_fn(&base_path, file_count, file_size_kb);
-        println!("Running system deletion (using {} command)...", if use_find_for_rm { "find" } else { "rm" });
+        println!(
+            "Running system deletion (using {} command)...",
+            if use_find_for_rm { "find" } else { "rm" }
+        );
         let (rm_time, system_cmd) = measure_rm_deletion(&pattern, use_find_for_rm);
         println!("System deletion completed in {}", format_duration(rm_time));
 
@@ -1317,7 +1352,7 @@ mod performance_tests {
         println!("\n===== Starting Performance Benchmarks =====");
 
         let mut results = Vec::new();
-        results.push(run_benchmark("One file (1 x 10 KB)", 10, 10, false, false));
+        results.push(run_benchmark("One file (10 x 10 KB)", 10, 10, false, false));
         results.push(run_benchmark("Small files (10 x 1 KB)", 10, 1, false, false));
         results.push(run_benchmark("Some small files (30,000 x 1 KB)", 30_000, 1, false, false));
         results.push(run_benchmark("Many small files (100,000 x 1 KB)", 100_000, 1, true, true));
@@ -1335,7 +1370,11 @@ mod performance_tests {
 
         for result in results {
             let diff = (result.rust_time - result.rm_time).abs();
-            let winner = if result.rust_time < result.rm_time { "Rust" } else { "System" };
+            let winner = if result.rust_time < result.rm_time {
+                "Rust"
+            } else {
+                "System"
+            };
             println!(
                 "{:<40} | {:>10} | {:>10} | {:>10} | {:<30}",
                 result.test_name,
@@ -1359,10 +1398,13 @@ mod performance_tests {
         let pattern = format!("{}/no_such_file_*.dat", base);
 
         let elapsed = measure_rust_deletion(&pattern);
-        println!("Rust deletion with no matches completed in {}.", format_duration(elapsed));
+        println!(
+            "Rust deletion with no matches completed in {}.",
+            format_duration(elapsed)
+        );
     }
 
-    /// Test to makes sure that directories are not removed during deletion.
+    /// Test to ensure that directories are not removed during deletion.
     #[test]
     fn test_skips_directories() {
         println!("\n--- Test: Skipping Directories ---");
@@ -1378,15 +1420,18 @@ mod performance_tests {
         let pattern_str = pattern.to_string_lossy().to_string();
 
         let elapsed = measure_rust_deletion(&pattern_str);
-        println!("Rust deletion (skipping directories) completed in {}.", format_duration(elapsed));
+        println!(
+            "Rust deletion (skipping directories) completed in {}.",
+            format_duration(elapsed)
+        );
 
         // Verify that the directory still exists and the file has been deleted.
         assert!(dir_path.is_dir(), "Directory was deleted!");
         assert!(!file_path.exists(), "File was not deleted!");
     }
 
-    /// Test to make sure that when the deletion pattern only matches some files,
-    /// only the matching files are removed while non-matching files remain.
+    /// Test to ensure that when the deletion pattern only matches some files,
+    /// only the matching files are removed while non‑matching files remain.
     #[test]
     fn test_partial_match_deletion() {
         println!("\n--- Test: Partial Pattern Deletion ---");
@@ -1419,305 +1464,30 @@ mod performance_tests {
 
         println!("Running Rust deletion on partial match pattern...");
         let elapsed = measure_rust_deletion(&pattern_str);
-        println!("Rust deletion (partial match) completed in {}.", format_duration(elapsed));
+        println!(
+            "Rust deletion (partial match) completed in {}.",
+            format_duration(elapsed)
+        );
 
         // Confirm that matching files have been deleted.
         for path in matching_files {
-            assert!(!path.exists(), "Matching file {} was not deleted", path.display());
+            assert!(
+                !path.exists(),
+                "Matching file {} was not deleted",
+                path.display()
+            );
         }
 
-        // Confirm that non-matching files remain, then clean them up.
+        // Confirm that non‑matching files remain, then clean them up.
         for path in non_matching_files {
-            assert!(path.exists(), "Non-matching file {} was mistakenly deleted", path.display());
+            assert!(
+                path.exists(),
+                "Non‑matching file {} was mistakenly deleted",
+                path.display()
+            );
             fs::remove_file(&path).unwrap();
         }
     }
-}
-
-
-
-
-
-#[cfg(test)]
-mod empirical_tests {
-    use super::*;
-    use std::fs::{File};
-    use std::io::Write;
-    use std::path::PathBuf;
-    use std::time::{Instant, Duration};
-    use tempfile::tempdir;
-    use std::iter;
-
-    const TEST_FILE_SIZE_KB: usize = 1;
-    const TEST_FILE_COUNT: usize = 100;
-    const ITERATIONS: usize = 100;
-
-    fn unlink_file(path: &Path) -> io::Result<()> {
-        let c_str = CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Path contains null byte"))?;
-        let ret = unsafe { libc::unlink(c_str.as_ptr()) };
-        if ret == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-
-    fn create_files_for_measurement(dir: &Path) -> Vec<PathBuf> {
-        let mut paths = Vec::new();
-        for i in 0..TEST_FILE_COUNT {
-            let file_path = dir.join(format!("test_file_{}.dat", i));
-            let mut file = File::create(&file_path).unwrap();
-            file.write_all(&vec![0u8; TEST_FILE_SIZE_KB * 1024]).unwrap();
-            paths.push(file_path);
-        }
-        paths
-    }
-
-    fn measure_path_conversion_time_inner() -> f64 {
-        const ITERS: usize = 10_000;
-        let path_str: String = format!("/tmp/long_path_for_conversion/dir1/dir2/file_{}.dat",  iter::repeat(0).take(20).map(|_| "A".to_string()).collect::<String>());
-        let mut total_ns = 0u128;
-
-        for _ in 0..ITERS {
-            let start = Instant::now();
-            let _ = CString::new(&path_str[..]).expect("CString conversion failed");
-            total_ns += start.elapsed().as_nanos();
-        }
-
-        total_ns as f64 / ITERS as f64
-    }
-
-    #[test]
-    fn measure_path_conversion_time() {
-        let avg_ns = measure_path_conversion_time_inner();
-        println!("[Empirical] T_conversion (Path Conversion Time) = {:.2} ns/path", avg_ns);
-        assert!(avg_ns > 0.0);
-    }
-
-    fn measure_syscall_time_inner(files: &Vec<PathBuf>) -> f64 {
-        let mut total_ns = 0u128;
-        for path in files {
-            let start = Instant::now();
-            unlink_file(path).expect("Failed to unlink in test");
-            total_ns += start.elapsed().as_nanos();
-        }
-        total_ns as f64 / files.len() as f64
-    }
-
-    #[test]
-    fn measure_syscall_time() {
-        let tmp_dir = tempdir().unwrap();
-        let base_files = create_files_for_measurement(tmp_dir.path());
-        let avg_syscall_ns = measure_syscall_time_inner(&base_files);
-        println!("[Empirical] T_syscall (System Call Time) = {:.2} ns/file", avg_syscall_ns);
-        assert!(avg_syscall_ns > 0.0);
-    }
-
-    fn measure_task_overhead_inner() -> f64 {
-        const TASKS: usize = 100;
-        const CONCURRENCY_LEVEL: usize = 4;
-        let mut total_ns = 0u128;
-        for _ in 0..TASKS {
-            let start = Instant::now();
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            runtime.block_on(async {
-                let futures: Vec<_> = (0..CONCURRENCY_LEVEL)
-                    .map(|_| {
-                        tokio::spawn(async {
-                            tokio::task::yield_now().await;
-                        })
-                    })
-                    .collect();
-                futures::future::join_all(futures).await;
-            });
-            total_ns += start.elapsed().as_nanos();
-        }
-        total_ns as f64 / TASKS as f64 / CONCURRENCY_LEVEL as f64
-    }
-
-
-    #[test]
-    fn measure_task_overhead() {
-        let avg_overhead_ns = measure_task_overhead_inner();
-        println!("[Empirical] T_overhead (Task Management Overhead) = {:.2} ns/task", avg_overhead_ns);
-        assert!(avg_overhead_ns > 0.0);
-    }
-
-    fn measure_concurrent_deletion_time(n: usize, files: Vec<PathBuf>) -> Duration {
-        let start = Instant::now();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-    
-        runtime.block_on(async {
-            futures::stream::iter(files)
-                .for_each_concurrent(Some(n), |path| async move {
-                    if let Err(e) = unlink_file(&path) {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            panic!("Failed to delete '{}': {}", path.display(), e);
-                        }
-                    }
-                })
-                .await;
-        });
-        start.elapsed()
-    }
-
-
-    /// Measure I/O Efficiency f_disk(n) and return the data
-    fn measure_io_efficiency() -> Vec<(f64, f64)> {
-        let tmp_dir = tempdir().unwrap();
-        let base_files = create_files_for_measurement(tmp_dir.path());
-        let concurrency_levels = vec![1, 2, 4, 8, 16, 32, 64, 128];
-
-        let avg_conversion_ns = measure_path_conversion_time_inner();
-        let avg_syscall_ns = measure_syscall_time_inner(&base_files);
-        let avg_overhead_ns = measure_task_overhead_inner();
-
-        println!("\n[Empirical] I/O Efficiency f_disk(n) at different concurrency levels:");
-        println!("--- Empirical Constants (for f_disk calculation) ---");
-        println!("T_conversion = {:.2} ns/path", avg_conversion_ns);
-        println!("T_syscall = {:.2} ns/file", avg_syscall_ns);
-        println!("T_overhead = {:.2} ns/task", avg_overhead_ns);
-        println!("--- f_disk(n) values ---");
-
-        let n_files = base_files.len();
-        let mut f_disk_values = Vec::new();
-
-        for &concurrency in &concurrency_levels {
-            let mut total_deletion_time = Duration::new(0, 0);
-            for _ in 0..ITERATIONS {
-                let files = create_files_for_measurement(tmp_dir.path());
-                total_deletion_time += measure_concurrent_deletion_time(concurrency, files);
-            }
-            let avg_total_deletion_time_ns = total_deletion_time.as_nanos() / ITERATIONS as u128;
-
-            let t_syscall_actual_ns = (avg_total_deletion_time_ns as f64) - (n_files as f64 * avg_conversion_ns) - (concurrency as f64 * avg_overhead_ns);
-            let t_syscall_ideal_ns = (n_files as f64 * avg_syscall_ns) / concurrency as f64;
-
-            let f_disk_n = if t_syscall_actual_ns > 0.0 {
-                t_syscall_ideal_ns / t_syscall_actual_ns
-            } else {
-                1.0
-            };
-
-            println!("f_disk({}) = {:.6}", concurrency, f_disk_n);
-            f_disk_values.push((concurrency as f64, f_disk_n)); // Store for curve fitting
-        }
-    f_disk_values
-    }
-
-
-    #[test]
-    fn test_fit_f_disk_function() {
-        // Obtain empirical data: a vector of (n, f_disk) measurements.
-        let data = measure_io_efficiency();
-        if data.is_empty() {
-            panic!("No empirical I/O efficiency data available.");
-        }
-    
-        // Separate the data into two vectors:
-        let n_values: Vec<f64> = data.iter().map(|&(n, _)| n).collect();
-        let f_values: Vec<f64> = data.iter().map(|&(_, f)| f).collect();
-
-        // Define the cost function (sum of squared errors).
-        // For each measured data point (n, f_emp), the model predicts:
-        //    f_pred = 1 / (1 + a * n^b)
-        // and we accumulate (f_pred - f_emp)^2.
-        let cost = |a: f64, b: f64| -> f64 {
-            n_values.iter()
-                .zip(f_values.iter())
-                .fold(0.0, |acc, (&n, &f_emp)| {
-                    let f_pred = 1.0 / (1.0 + a * n.powf(b));
-                    acc + (f_pred - f_emp).powi(2)
-                })
-        };
-    
-        // Compute numerical gradients using central differences.
-        let gradient = |a: f64, b: f64| -> (f64, f64) {
-            let eps = 1e-6;
-            let cost_a_plus = cost(a + eps, b);
-            let cost_a_minus = cost(a - eps, b);
-            let grad_a = (cost_a_plus - cost_a_minus) / (2.0 * eps);
-            let cost_b_plus = cost(a, b + eps);
-            let cost_b_minus = cost(a, b - eps);
-            let grad_b = (cost_b_plus - cost_b_minus) / (2.0 * eps);
-            (grad_a, grad_b)
-        };
-    
-        // --- Optimization Settings ---
-        let max_iters = 1000;
-        let tol = 1e-9;
-        let learning_rate = 1e-3; // initial learning rate
-    
-        // Initial guesses for a and b.
-        let mut a = 0.01;
-        let mut b = 1.0;
-    
-        let current_cost = cost(a, b);
-        println!("Initial cost: {:.12}", current_cost);
-    
-        // Begin gradient descent loop.
-        for iter in 0..max_iters {
-            // Compute the gradient.
-            let (grad_a, grad_b) = gradient(a, b);
-            let grad_norm = (grad_a.powi(2) + grad_b.powi(2)).sqrt();
-    
-            // If the gradient is very small, assume convergence.
-            if grad_norm < tol {
-                println!("Convergence reached at iteration {} (grad_norm = {:.12}).", iter, grad_norm);
-                break;
-            }
-    
-            // Backtracking line search: try reducing the step if cost does not decrease.
-            let mut step = learning_rate;
-            let mut new_a = a - step * grad_a;
-            let mut new_b = b - step * grad_b;
-            // Project parameters to remain positive.
-            new_a = new_a.max(1e-6);
-            new_b = new_b.max(1e-6);
-            let mut new_cost = cost(new_a, new_b);
-    
-            // Reduce the step size until the cost decreases.
-            while new_cost > current_cost && step > 1e-12 {
-                step *= 0.5;
-                new_a = a - step * grad_a;
-                new_b = b - step * grad_b;
-                new_a = new_a.max(1e-6);
-                new_b = new_b.max(1e-6);
-                new_cost = cost(new_a, new_b);
-            }
-    
-            // If no improvement is possible, break.
-            if new_cost >= current_cost {
-                println!("No improvement found at iteration {} (cost: {:.12}).", iter, current_cost);
-                break;
-            }
-    
-            // Accept the new parameters.
-            a = new_a;
-            b = new_b;
-    
-            // Check for convergence based on cost improvement.
-            if (current_cost - new_cost).abs() < tol {
-                println!("Cost improvement below tolerance at iteration {}.", iter);
-                break;
-            }
-        }
-    
-        println!("\n--- Fitted Parameters for f_disk(n) = 1/(1 + a * n^b) ---");
-        println!("F_DISK_A_FIT = {:.8}", a);
-        println!("F_DISK_B_FIT = {:.8}", b);
-    
-        assert!(a > 0.0, "Fitted parameter 'a' should be positive; got {:.8}", a);
-        assert!(b > 0.0, "Fitted parameter 'b' should be positive; got {:.8}", b);
-    }
-
 }
 
 
