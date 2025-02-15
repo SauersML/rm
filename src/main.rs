@@ -567,17 +567,17 @@ mod shell_performance {
         let dir_path = Path::new(BASE_TEST_DIR)
             .join(format!("{}_{}_iter{}", test_name, command_type, iteration));
 
-        // Remove the directory if it already exists
+        // Remove the directory if it already exists.
         if dir_path.exists() {
             fs::remove_dir_all(&dir_path)
                 .unwrap_or_else(|e| panic!("Failed to remove {}: {}", dir_path.display(), e));
         }
 
-        // Create the new directory
+        // Create the new directory.
         fs::create_dir_all(&dir_path)
             .unwrap_or_else(|e| panic!("Failed to create {}: {}", dir_path.display(), e));
 
-        // Print filesystem information for transparency
+        // Print filesystem information for transparency.
         println!(
             "Filesystem info for {}:\n{}",
             dir_path.display(),
@@ -603,14 +603,12 @@ mod shell_performance {
 
     /// Verifies that no files matching the provided glob pattern remain.
     ///
-    /// This function checks for any undeleted files that match the given glob pattern. If any are found,
-    /// it prints debugging information including each file's path and then panics.
-    ///
-    /// Panics if any file matching the pattern is found.
+    /// This function checks for any undeleted files that match the given glob pattern.
+    /// If any are found, it prints debugging information including each file's path and then panics.
     fn verify_no_files(pattern: &str) {
         let mut count = 0;
         let mut undeleted_files = Vec::new();
-    
+
         // Iterate over all entries that match the glob pattern.
         for entry in glob(pattern).expect("Invalid glob pattern") {
             match entry {
@@ -626,7 +624,7 @@ mod shell_performance {
                 }
             }
         }
-    
+
         // If any undeleted files are found, output their paths and panic.
         if count > 0 {
             println!("DEBUG: Found {} undeleted file(s) matching '{}':", count, pattern);
@@ -637,14 +635,13 @@ mod shell_performance {
         }
     }
 
-
     /// Executes a shell command (using `sh -c`) and returns the elapsed time in seconds.
     ///
     /// The command execution is sandwiched between calls to `sync` to flush pending I/O.
     fn run_command(command: &str, pattern: &str) -> f64 {
         println!("Executing: {}", command);
 
-        // Flush I/O before starting the timer
+        // Flush I/O before starting the timer.
         Command::new("sync")
             .status()
             .expect("Failed to sync before command");
@@ -664,14 +661,14 @@ mod shell_performance {
             );
         }
 
-        // Flush I/O after command execution
+        // Flush I/O after command execution.
         Command::new("sync")
             .status()
             .expect("Failed to sync after command");
 
         let elapsed = start.elapsed().as_secs_f64();
 
-        // Allow filesystem metadata to settle
+        // Allow filesystem metadata to settle.
         sleep(Duration::from_millis(100));
         verify_no_files(pattern);
         elapsed
@@ -752,7 +749,7 @@ mod shell_performance {
         println!("\n===== {}: {} file(s) =====", test_name, file_count);
         println!("Using base test directory: {}", BASE_TEST_DIR);
 
-        // Benchmark the Rust binary deletion
+        // Benchmark the Rust binary deletion.
         println!("--- Running Rust binary Deletion_Benchmark ---");
         let mut rust_times = Vec::with_capacity(ITERATIONS);
         for iter in 0..ITERATIONS {
@@ -764,7 +761,7 @@ mod shell_performance {
             test_name, min_r, max_r, mean_r, median_r, stddev_r
         );
 
-        // Benchmark the system deletion command
+        // Benchmark the system deletion command.
         println!("--- Running system Deletion_Benchmark ---");
         let mut system_times = Vec::with_capacity(ITERATIONS);
         for iter in 0..ITERATIONS {
@@ -789,8 +786,6 @@ mod shell_performance {
         println!("=== Benchmarks Complete ===");
     }
 }
-
-
 
 // cargo test --release -- --nocapture t_r_performance
 #[cfg(test)]
