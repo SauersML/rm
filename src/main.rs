@@ -807,7 +807,11 @@ mod t_r_performance {
     const ITERATIONS: usize = 10;
 
     // Base directory for test runs
-    const BASE_TEST_DIR: &str = "~/tmp_test";
+    fn base_test_dir() -> std::path::PathBuf {
+        let home = std::env::var("HOME").expect("HOME environment variable not set");
+        std::path::PathBuf::from(home).join("tmp_test")
+    }
+
 
     /// Returns filesystem info (using `df -T`) for the given directory.
     fn get_filesystem_info(dir: &Path) -> String {
@@ -823,8 +827,9 @@ mod t_r_performance {
     /// The directory will be created at:
     ///   BASE_TEST_DIR/<test_name>_<command_type>_iter<iteration>
     fn prepare_test_directory(test_name: &str, command_type: &str, iteration: usize) -> PathBuf {
-        let dir_path = Path::new(BASE_TEST_DIR)
-            .join(format!("{}_{}_iter{}", test_name, command_type, iteration));
+    let dir_path = base_test_dir()
+        .join(format!("{}_{}_iter{}", test_name, command_type, iteration));
+
         // Remove the directory if it already exists
         if dir_path.exists() {
             fs::remove_dir_all(&dir_path)
