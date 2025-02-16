@@ -441,20 +441,6 @@ fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>)>> {
 }
 
 
-/// Collects matching filenames in the given directory using a fast,
-/// `getdents64`-based approach on Linux.
-/// We do not build full paths; we just store the base names of regular files
-/// that match the provided globset. The directory file descriptor (`fd`)
-/// remains open so we can use it with `unlinkat` later.
-///
-/// # Inputs
-/// - `dir`: A canonicalized directory (absolute path) in which to search.
-/// - `matcher`: A reference to a `GlobSet` matcher built from the desired filename pattern.
-///
-/// # Output
-/// Returns an `io::Result<(RawFd, Vec<CString>)>` containing:
-///   1. A file descriptor (open directory) to be used with `unlinkat`.
-///   2. A list of matching filenames (as CStrings), not full paths.
 #[cfg(target_os = "linux")]
 fn collect_matching_files(
     dir: &std::path::Path,
