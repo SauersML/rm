@@ -1009,7 +1009,7 @@ mod t_r_performance {
     };
 
     // Number of iterations per command
-    const ITERATIONS: usize = 10;
+    const ITERATIONS: usize = 100;
 
     // Base directory for test runs
     fn base_test_dir() -> std::path::PathBuf {
