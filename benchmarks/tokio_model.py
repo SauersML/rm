@@ -11,8 +11,8 @@ def main():
     # =======================
     # 1. Load and Prepare Data
     # =======================
-    # CSV columns: file_count, time_in_seconds, thread_pool_size, batch_size
-    df = pd.read_csv("test_results.csv", header=0, # Tell pandas to read header
+    # CSV columns: SimulatedCPUs, NumFiles, Concurrency, TotalTime
+    df = pd.read_csv("test_results.csv", header=0,
                      names=["SimulatedCPUs", "NumFiles", "Concurrency", "TotalTime"])
 
     # Avoid issues with log(0)
@@ -42,18 +42,17 @@ def main():
         df["logSimulatedCPUs"] * df["logNumFiles"] * df["logConcurrency"]
     )
 
-    # Predictors list per the proposed model (without log(T)*log(B))
+    # Predictors list per the proposed model (without log(SimulatedCPUs)*log(Concurrency) and without log(SimulatedCPUs)*log(NumFiles))
     predictors = [
-        "logSimulatedCPUs",  # C
-        "logNumFiles",  # F
-        "logConcurrency",  # Con
-        "logSimulatedCPUs_sq",  # C²
-        "logNumFiles_sq",  # F²
-        "logConcurrency_sq",  # Con²
-        "logNumFiles_x_logConcurrency",   # F*Con
-        "logSimulatedCPUs_x_logNumFiles_x_logConcurrency"  # C*F*Con
+        "logSimulatedCPUs",                  # log(SimulatedCPUs)
+        "logNumFiles",                       # log(NumFiles)
+        "logConcurrency",                    # log(Concurrency)
+        "logSimulatedCPUs_sq",               # [log(SimulatedCPUs)]^2
+        "logNumFiles_sq",                    # [log(NumFiles)]^2
+        "logConcurrency_sq",                 # [log(Concurrency)]^2
+        "logNumFiles_x_logConcurrency",      # log(NumFiles) * log(Concurrency)
+        "logSimulatedCPUs_x_logNumFiles_x_logConcurrency"  # log(SimulatedCPUs) * log(NumFiles) * log(Concurrency)
     ]
-    # REMOVE logSimulatedCPUs_x_logNumFiles and logSimulatedCPUs_x_logConcurrency
     X = df[predictors]
     y = df["logTotalTime"]
 
@@ -117,12 +116,11 @@ def main():
     beta7 = ridge_ols_model.params["logNumFiles_x_logConcurrency"]
     beta8 = ridge_ols_model.params["logSimulatedCPUs_x_logNumFiles_x_logConcurrency"]
 
-
     final_model_str = (
         "Final Chosen Ridge Model:\n" +
-        "log(TotalTime) = {:.4f} + {:.4f}*log(C) + {:.4f}*log(F) + {:.4f}*log(Con) + \n".format(beta0, beta1, beta2, beta3) +
-        "      {:.4f}*log(C)^2 + {:.4f}*log(F)^2 + {:.4f}*log(Con)^2 + \n".format(beta4, beta5, beta6) +
-        "      {:.4f}*log(F)*log(Con) + {:.4f}*log(C)*log(F)*log(Con)".format(beta7, beta8)
+        "log(TotalTime) = {:.4f} + {:.4f} * log(SimulatedCPUs) + {:.4f} * log(NumFiles) + {:.4f} * log(Concurrency) + \n".format(beta0, beta1, beta2, beta3) +
+        "      {:.4f} * [log(SimulatedCPUs)]^2 + {:.4f} * [log(NumFiles)]^2 + {:.4f} * [log(Concurrency)]^2 + \n".format(beta4, beta5, beta6) +
+        "      {:.4f} * log(NumFiles) * log(Concurrency) + {:.4f} * log(SimulatedCPUs) * log(NumFiles) * log(Concurrency)".format(beta7, beta8)
     )
 
     print("\n" + final_model_str)
@@ -143,12 +141,12 @@ def main():
         alpha=0.8
     )
     cbar = plt.colorbar(scatter, ax=ax, shrink=0.6)
-    cbar.set_label("log(time_in_seconds)")
+    cbar.set_label("log(TotalTime) in seconds")
 
     ax.set_xlabel("log(SimulatedCPUs)")
     ax.set_ylabel("log(NumFiles)")
     ax.set_zlabel("log(Concurrency)")
-    ax.set_title("3D Scatter Plot:\nLog(C), Log(F), Log(Con) (Color = log(TotalTime))")
+    ax.set_title("3D Scatter Plot:\nlog(SimulatedCPUs), log(NumFiles), log(Concurrency)\n(Color = log(TotalTime))")
 
     plt.tight_layout()
     plt.show()
