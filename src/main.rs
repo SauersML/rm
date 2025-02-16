@@ -221,6 +221,7 @@ fn main() {
 }
 
 /// Main async entry point
+#[cfg(not(target_os = "macos"))]
 async fn run_deletion_tokio<P: ProgressReporter + Clone>(
     concurrency_override: Option<usize>,
     progress_reporter: P,
@@ -273,6 +274,7 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
     Ok(())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn run_deletion_rayon(
     thread_pool_size: Option<usize>,
     batch_size_override: Option<usize>,
@@ -529,6 +531,9 @@ fn collect_matching_files(
         Ok((fd, files))
     }
 }
+// MACOS FUNCTIONS ============================================================================================
+// ============================================================================================================
+
 
 #[cfg(target_os = "macos")]
 fn collect_matching_files(
@@ -588,6 +593,159 @@ fn collect_matching_files(
     }
 }
 
+
+/// Synchronous deletion using Rayon for macOS.
+/// This function deletes files in parallel by always calling `libc::unlink()` and
+/// ignores the directory file descriptor.
+fn run_deletion_rayon(
+    thread_pool_size: Option<usize>,
+    batch_size_override: Option<usize>,
+    // On macOS, the FD passed in is not used for deletion.
+    _fd: RawFd,
+    matched_files: Vec<CString>,
+    matched_files_number: usize,
+) -> io::Result<()> {
+    // Compute the optimal thread pool size and batch size.
+    let (optimal_thread_pool, optimal_batch) = compute_optimal_rayon(matched_files_number);
+    let concurrency = thread_pool_size.unwrap_or_else(|| optimal_thread_pool.round() as usize);
+    let batch_size = batch_size_override.unwrap_or_else(|| optimal_batch.round() as usize);
+
+    println!(
+        "[INFO] Deleting {} files using Rayon with concurrency = {}, batch_size = {} (CPU cores = {})",
+        matched_files_number,
+        concurrency,
+        batch_size,
+        num_cpus::get()
+    );
+
+    // Setup a progress bar.
+    let config = Config {
+        throttle_millis: 250,
+        ..Default::default()
+    };
+    let pb = Arc::new(Bar::new(matched_files_number as u64, config));
+
+    // We'll send completed counts in batches to the progress bar thread.
+    let (sender, receiver) = channel::unbounded::<usize>();
+
+    // Spawn a thread to update the progress bar.
+    let pb_thread = std::thread::spawn({
+        let pb = Arc::clone(&pb);
+        move || {
+            let mut total_done = 0;
+            while let Ok(batch_count) = receiver.recv() {
+                total_done += batch_count;
+                pb.inc(batch_count as u64);
+            }
+            // If for some reason we didn't get the last partial batch, account for it here.
+            let remainder = matched_files_number - total_done;
+            if remainder > 0 {
+                pb.inc(remainder as u64);
+            }
+            // We'll finish the bar later.
+        }
+    });
+
+    // Build a custom Rayon thread pool with the desired concurrency.
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(concurrency)
+        .build()
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to build Rayon thread pool: {}", e),
+            )
+        })?;
+
+    // Run the parallel deletion inside the custom thread pool.
+    pool.install(|| {
+        matched_files.par_chunks(batch_size).for_each(|chunk| {
+            let mut count = 0;
+            for filename_cstr in chunk {
+                // Always use `libc::unlink` on macOS.
+                let result = unsafe { libc::unlink(filename_cstr.as_ptr()) };
+                if result == 0 {
+                    count += 1;
+                } else {
+                    let e = io::Error::last_os_error();
+                    eprintln!(
+                        "Failed to delete '{}': {}",
+                        filename_cstr.to_string_lossy(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
+            }
+            // Send the count of successfully deleted files for this chunk.
+            sender.send(count).unwrap();
+        });
+    });
+
+    // Close the sender so that the progress thread can exit.
+    drop(sender);
+    pb_thread.join().unwrap();
+
+    // Finish the progress bar.
+    match Arc::try_unwrap(pb) {
+        Ok(bar) => bar.finish(),
+        Err(_) => eprintln!("[WARN] Could not get exclusive ownership of progress bar."),
+    }
+
+    // NOTE: No need to close the directory FD on macOS as it was handled during file collection.
+    Ok(())
+}
+
+
+/// Main async entry point for macOS using Tokio.
+/// This function deletes files using asynchronous tasks and always calls `libc::unlink()`.
+async fn run_deletion_tokio<P: ProgressReporter + Clone>(
+    concurrency_override: Option<usize>,
+    progress_reporter: P,
+    // On macOS, the file descriptor from directory opening is not used for deletion.
+    _fd: RawFd,
+    matched_files: Vec<CString>,
+    matched_files_number: usize,
+) -> io::Result<()> {
+    let concurrency = concurrency_override.unwrap_or_else(|| {
+        compute_optimal_tokio(matched_files_number, num_cpus::get())
+            .round() as usize
+    });
+    println!(
+        "[INFO] Deleting {} files with concurrency = {} (CPU cores = {})",
+        matched_files_number,
+        concurrency,
+        num_cpus::get()
+    );
+
+    let file_stream = futures::stream::iter(matched_files.into_iter());
+    let pr_for_tasks = progress_reporter.clone();
+
+    file_stream
+        .for_each_concurrent(Some(concurrency), move |filename_cstr| {
+            let progress_reporter_value = pr_for_tasks.clone();
+            async move {
+                // On macOS, we always call `libc::unlink` to delete the file.
+                let result = unsafe { libc::unlink(filename_cstr.as_ptr()) };
+
+                if result == 0 {
+                    progress_reporter_value.inc(1);
+                } else {
+                    let e = io::Error::last_os_error();
+                    eprintln!(
+                        "Failed to delete '{}': {}",
+                        filename_cstr.to_string_lossy(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
+            }
+        })
+        .await;
+
+    progress_reporter.finish();
+    // NOTE: We do not close the directory FD here since it was already closed after collection.
+    Ok(())
+}
 
 
 // ====================================================================================================================================
