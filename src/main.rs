@@ -479,7 +479,7 @@ fn collect_matching_files(
         // Allocate a large buffer to minimize syscall overhead
         let buf_size = 1 << 26; // 64 MB
         let mut buf = vec![0u8; buf_size];
-        let files = Vec::new();
+        let mut files = Vec::new();
 
         #[cfg(target_os = "linux")]
         {
