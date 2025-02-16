@@ -857,6 +857,7 @@ mod shell_performance {
 }
 
 // cargo test --release -- --nocapture t_r_performance
+#[allow(non_snake_case)]
 #[cfg(test)]
 mod t_r_performance {
     use glob::glob;
