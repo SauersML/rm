@@ -13,165 +13,184 @@ def main():
     # =======================
     # 1. Load and Prepare Data
     # =======================
-    # Expected CSV columns: SimulatedCPUs, NumFiles, Concurrency, TotalTime(ns)
-    df = pd.read_csv("test_results.csv")
-    df.rename(columns={"TotalTime(ns)": "TotalTime"}, inplace=True)
+    # The CSV (with no header) has columns in order:
+    # file_count, time_in_seconds, thread_pool_size, batch_size
+    df = pd.read_csv("rayon_deletion_benchmark.csv", header=None,
+                     names=["file_count", "time_in_seconds", "thread_pool_size", "batch_size"])
+    # Rename column for clarity (simulate "TotalTime(ns)")
+    df.rename(columns={"time_in_seconds": "TotalTime"}, inplace=True)
     
-    # Add a small constant to avoid log(0)
+    # Add a small constant to avoid taking log(0)
     epsilon = 1e-6
-    for col in ['SimulatedCPUs', 'NumFiles', 'Concurrency', 'TotalTime']:
+    for col in ["file_count", "TotalTime", "thread_pool_size", "batch_size"]:
         df[col] = df[col] + epsilon
 
-    # Log-transform all variables with interpretable names
-    df["logSimulatedCPUs"] = np.log(df["SimulatedCPUs"])
-    df["logNumFiles"] = np.log(df["NumFiles"])
-    df["logConcurrency"] = np.log(df["Concurrency"])
+    # Log-transform all variables with clear names
+    df["log_file_count"] = np.log(df["file_count"])
     df["logTotalTime"] = np.log(df["TotalTime"])
+    df["log_thread_pool_size"] = np.log(df["thread_pool_size"])
+    df["log_batch_size"] = np.log(df["batch_size"])
     
     # =======================
     # 2. Feature Engineering
     # =======================
-    # Create additional predictors:
-    #   - logConcurrencySquared = (logConcurrency)^2
-    #   - logSimCPUs_x_logConcurrency = logSimulatedCPUs * logConcurrency
-    df["logConcurrencySquared"] = df["logConcurrency"] ** 2
-    df["logSimCPUs_x_logConcurrency"] = df["logSimulatedCPUs"] * df["logConcurrency"]
-
-    predictor_names = ["logSimulatedCPUs", "logNumFiles", "logConcurrency",
-                       "logConcurrencySquared", "logSimCPUs_x_logConcurrency"]
-    X = df[predictor_names]
+    # Create additional predictors for the model:
+    #   - log_thread_pool_size_sq = (log(thread_pool_size))^2
+    #   - log_batch_size_sq = (log(batch_size))^2
+    #   - log_tp_bs_interaction = log(thread_pool_size) * log(batch_size)
+    df["log_thread_pool_size_sq"] = df["log_thread_pool_size"] ** 2
+    df["log_batch_size_sq"] = df["log_batch_size"] ** 2
+    df["log_tp_bs_interaction"] = df["log_thread_pool_size"] * df["log_batch_size"]
+    
+    # Our predictors include file_count as exogenous.
+    predictors = ["log_thread_pool_size", "log_batch_size", "log_file_count",
+                  "log_thread_pool_size_sq", "log_batch_size_sq", "log_tp_bs_interaction"]
+    X = df[predictors]
     y = df["logTotalTime"]
     
     # =======================
     # 3. Cross-Validation for Ridge Regression
     # =======================
     cv = KFold(n_splits=5, shuffle=True, random_state=42)
-    # Define a negative RMSE scorer (we want to minimize RMSE on the log scale)
     def neg_rmse(estimator, X_val, y_val):
-        predictions = estimator.predict(X_val)
-        rmse = np.sqrt(mean_squared_error(y_val, predictions))
+        preds = estimator.predict(X_val)
+        rmse = np.sqrt(mean_squared_error(y_val, preds))
         return -rmse
 
     ridge = Ridge(fit_intercept=True)
     alphas = np.logspace(-2, 2, 50)
-    param_grid = {'alpha': alphas}
+    param_grid = {"alpha": alphas}
     ridge_grid = GridSearchCV(ridge, param_grid, cv=cv, scoring=neg_rmse)
     ridge_grid.fit(X, y)
-    best_alpha = ridge_grid.best_params_['alpha']
+    best_alpha = ridge_grid.best_params_["alpha"]
     best_ridge_rmse = -ridge_grid.best_score_
     print("Ridge CV Results:")
     print(f"  Best alpha: {best_alpha:.4f}")
     print(f"  Best CV RMSE (log scale): {best_ridge_rmse:.4f}")
     
     # =======================
-    # 4. Refit Ridge Regression via Augmented OLS to Obtain p-values
+    # 4. Refit Ridge via Augmented OLS to Obtain p-values
     # =======================
-    # Augment the design matrix so that we mimic Ridge regression while obtaining p-values.
-    X_with_const = sm.add_constant(X)  # Adds column "const"
-    # Separate the constant and predictors
+    # We augment the design matrix (only penalize predictors, not the intercept)
+    X_with_const = sm.add_constant(X)  # adds "const"
     const_df = X_with_const[['const']]
     predictors_df = X_with_const.drop(columns="const")
-    n_samples, n_features = predictors_df.shape  # n_features should be 5
+    n_samples, n_features = predictors_df.shape  # Should be 6
 
-    # Create augmented predictors: append sqrt(best_alpha)*I for predictors
+    # Create augmented predictors: stack predictors with sqrt(best_alpha)*I (for each predictor)
     aug_predictors = pd.DataFrame(np.sqrt(best_alpha) * np.eye(n_features),
                                   columns=predictors_df.columns,
                                   index=["aug_" + col for col in predictors_df.columns])
-    # Augmented constant: ones for the augmented rows (unpenalized)
+    # Augmented constant: ones for each augmented row (unpenalized)
     aug_const = pd.DataFrame(np.ones((n_features, 1)), columns=["const"],
                              index=aug_predictors.index)
-    # Concatenate original data with augmented data
     X_augmented = pd.concat([X_with_const, pd.concat([aug_const, aug_predictors], axis=1)], axis=0)
-    # Augmented response: original y values and zeros for augmented rows
     y_augmented = pd.concat([y, pd.Series(np.zeros(n_features), index=aug_predictors.index)])
     
     ridge_ols_model = sm.OLS(y_augmented, X_augmented).fit()
     print("\nFinal Ridge Regression Model (Augmented OLS) Summary:")
     print(ridge_ols_model.summary())
     
-    # Extract interpretable coefficients. Our final model is:
-    # logTotalTime = β₀ + β₁·logSimulatedCPUs + β₂·logNumFiles + β₃·logConcurrency +
-    #                β₄·(logConcurrency)² + β₅·(logSimulatedCPUs × logConcurrency)
+    # Extract coefficients with interpretable names.
+    # Final model:
+    # log(time_in_seconds) = β0 + β1·log(thread_pool_size) + β2·log(batch_size) + β3·log(file_count)
+    #                        + β4·(log(thread_pool_size))^2 + β5·(log(batch_size))^2 + β6·(log(thread_pool_size) * log(batch_size))
     beta0 = ridge_ols_model.params["const"]
-    beta1 = ridge_ols_model.params["logSimulatedCPUs"]
-    beta2 = ridge_ols_model.params["logNumFiles"]
-    beta3 = ridge_ols_model.params["logConcurrency"]
-    beta4 = ridge_ols_model.params["logConcurrencySquared"]
-    beta5 = ridge_ols_model.params["logSimCPUs_x_logConcurrency"]
+    beta1 = ridge_ols_model.params["log_thread_pool_size"]
+    beta2 = ridge_ols_model.params["log_batch_size"]
+    beta3 = ridge_ols_model.params["log_file_count"]
+    beta4 = ridge_ols_model.params["log_thread_pool_size_sq"]
+    beta5 = ridge_ols_model.params["log_batch_size_sq"]
+    beta6 = ridge_ols_model.params["log_tp_bs_interaction"]
 
-    # Print the final chosen model in plain text math format:
     final_model_str = (
         "Final Chosen Ridge Model:\n"
-        "log(TotalTime) = {:.4f} + {:.4f} * log(SimulatedCPUs) + {:.4f} * log(NumFiles) + "
-        "{:.4f} * log(Concurrency) + {:.4f} * (log(Concurrency))^2 + {:.4f} * (log(SimulatedCPUs) * log(Concurrency))"
-    ).format(beta0, beta1, beta2, beta3, beta4, beta5)
+        "log(time_in_seconds) = {:.4f} + {:.4f} * log(thread_pool_size) + {:.4f} * log(batch_size) + "
+        "{:.4f} * log(file_count) + {:.4f} * (log(thread_pool_size))^2 + {:.4f} * (log(batch_size))^2 + "
+        "{:.4f} * (log(thread_pool_size) * log(batch_size))"
+    ).format(beta0, beta1, beta2, beta3, beta4, beta5, beta6)
     print("\n" + final_model_str)
     
     # =======================
-    # 5. Convex Optimization for Optimal log(Concurrency)
+    # 5. Convex Optimization for Optimal Decision Variables
     # =======================
-    # For fixed values of logSimulatedCPUs (LSC) and logNumFiles (LNF), our model is:
-    # f(x) = β₀ + β₁·LSC + β₂·LNF + (β₃ + β₅·LSC)*x + β₄*x², where x = log(Concurrency)
-    # We constrain x >= 0 (so Concurrency >= 1).
-    def optimize_log_concurrency(fixed_logSimulatedCPUs, fixed_logNumFiles):
-        log_con_var = cp.Variable()  # Represents log(Concurrency)
-        linear_coef = beta3 + beta5 * fixed_logSimulatedCPUs
-        constant_term = beta0 + beta1 * fixed_logSimulatedCPUs + beta2 * fixed_logNumFiles
-        objective = cp.Minimize(constant_term + linear_coef * log_con_var + beta4 * cp.square(log_con_var))
-        constraints = [log_con_var >= 0]
+    # We can modify two variables: thread_pool_size and batch_size.
+    # Let T = log(thread_pool_size) and B = log(batch_size). The file_count (F) is fixed.
+    # Our model is:
+    # log(time_in_seconds) = β0 + β1*T + β2*B + β3*F + β4*T^2 + β5*B^2 + β6*(T*B)
+    # For a fixed file_count (i.e. fixed F), define:
+    # f(T, B) = (β0 + β3*F) + β1*T + β2*B + β4*T^2 + β5*B^2 + β6*(T*B)
+    # We'll minimize f(T, B) subject to T >= 0 and B >= 0.
+    def optimize_decision_variables(fixed_logFileCount):
+        T = cp.Variable()  # T = log(thread_pool_size)
+        B = cp.Variable()  # B = log(batch_size)
+        constant_part = beta0 + beta3 * fixed_logFileCount
+        linear_part = beta1 * T + beta2 * B
+        # Express the quadratic part using a quadratic form.
+        # Let Q = [[β4, β6/2], [β6/2, β5]]
+        Q = np.array([[beta4, beta6/2.0],
+                      [beta6/2.0, beta5]])
+        quad_part = cp.quad_form(cp.vstack([T, B]), Q)
+        objective = cp.Minimize(constant_part + linear_part + quad_part)
+        constraints = [T >= 0, B >= 0]  # ensuring thread_pool_size and batch_size are at least 1 (log(1)=0)
         prob = cp.Problem(objective, constraints)
         prob.solve(solver=cp.ECOS)
-        return log_con_var.value
+        return T.value, B.value, prob.value
 
+    # For example, fix file_count = 100 (F = log(100))
+    fixed_file_count = 100
+    fixed_logFileCount = np.log(fixed_file_count)
+    opt_log_T, opt_log_B, optimal_obj = optimize_decision_variables(fixed_logFileCount)
+    opt_thread_pool_size = np.exp(opt_log_T)
+    opt_batch_size = np.exp(opt_log_B)
+    predicted_time = np.exp(optimal_obj)  # predicted time in seconds (original scale)
+    
+    print("\nFor file_count = {}:".format(fixed_file_count))
+    print("Optimal thread_pool_size (predicted, original scale): {:.2f}".format(opt_thread_pool_size))
+    print("Optimal batch_size (predicted, original scale): {:.2f}".format(opt_batch_size))
+    print("Predicted minimum time (seconds): {:.6f}".format(predicted_time))
+    
     # =======================
-    # 6. Compute Optimal log(Concurrency) Surface over a Grid
+    # 6. 3D Visualization: Optimal Surface for Decision Variables
     # =======================
+    # We'll fix file_count at the chosen value (e.g., 100) and create a grid in the (T, B) plane.
     grid_points = 20
-    # Use the original (unlogged) ranges for SimulatedCPUs and NumFiles.
-    simulatedCPUs_vals = np.linspace(df["SimulatedCPUs"].min(), df["SimulatedCPUs"].max(), grid_points)
-    numFiles_vals = np.linspace(df["NumFiles"].min(), df["NumFiles"].max(), grid_points)
-    CPUs_grid, Files_grid = np.meshgrid(simulatedCPUs_vals, numFiles_vals)
+    # Build grid in original units for thread_pool_size and batch_size:
+    thread_pool_vals = np.linspace(df["thread_pool_size"].min(), df["thread_pool_size"].max(), grid_points)
+    batch_size_vals = np.linspace(df["batch_size"].min(), df["batch_size"].max(), grid_points)
+    TP_grid, BS_grid = np.meshgrid(thread_pool_vals, batch_size_vals)
+    # Convert to log space:
+    log_TP_grid = np.log(TP_grid)
+    log_BS_grid = np.log(BS_grid)
     
-    # Convert these to log space for our predictors.
-    logSimCPUs_grid = np.log(CPUs_grid)
-    logNumFiles_grid = np.log(Files_grid)
+    # Compute predicted log(time_in_seconds) for each (T, B) pair using our model with fixed file_count.
+    predicted_log_time_grid = (beta0 + beta1 * log_TP_grid + beta2 * log_BS_grid +
+                               beta3 * fixed_logFileCount + beta4 * np.square(log_TP_grid) +
+                               beta5 * np.square(log_BS_grid) + beta6 * log_TP_grid * log_BS_grid)
     
-    optimal_logConcurrency_grid = np.zeros_like(logSimCPUs_grid)
-    for i in range(grid_points):
-        for j in range(grid_points):
-            fixed_logSimCPUs = logSimCPUs_grid[i, j]
-            fixed_logNumFiles = logNumFiles_grid[i, j]
-            optimal_logConcurrency_grid[i, j] = optimize_log_concurrency(fixed_logSimCPUs, fixed_logNumFiles)
-    
-    # =======================
-    # 7. 3D Visualization
-    # =======================
-    # Axes (all in log space):
-    #   x-axis: logSimulatedCPUs
-    #   y-axis: logNumFiles
-    #   z-axis: log(Concurrency)
-    # Observed data points are colored by logTotalTime.
+    # Create the 3D plot:
     fig = plt.figure(figsize=(12, 9))
     ax = fig.add_subplot(111, projection="3d")
     
-    scatter = ax.scatter(df["logSimulatedCPUs"], df["logNumFiles"], df["logConcurrency"],
+    # Plot observed data points in the space of log(thread_pool_size), log(batch_size), log(time)
+    scatter = ax.scatter(df["log_thread_pool_size"], df["log_batch_size"], df["logTotalTime"],
                          c=df["logTotalTime"], cmap="viridis", s=50, alpha=0.8)
-    colorbar = plt.colorbar(scatter, ax=ax, shrink=0.6)
-    colorbar.set_label("log(TotalTime)")
+    cbar = plt.colorbar(scatter, ax=ax, shrink=0.6)
+    cbar.set_label("log(time_in_seconds)")
     
-    # Plot the optimal log(Concurrency) surface (grid already in log space)
-    surface = ax.plot_surface(logSimCPUs_grid, logNumFiles_grid, optimal_logConcurrency_grid,
+    # Plot the predicted surface (optimal surface for decision variables)
+    surface = ax.plot_surface(log_TP_grid, log_BS_grid, predicted_log_time_grid,
                               cmap="coolwarm", alpha=0.6)
     
-    ax.set_xlabel("log(SimulatedCPUs)")
-    ax.set_ylabel("log(NumFiles)")
-    ax.set_zlabel("log(Concurrency)")
-    ax.set_title("3D Plot (Logged):\nSimulatedCPUs, NumFiles, Concurrency\n(Color = log(TotalTime))\nOptimal log(Concurrency) Surface")
+    ax.set_xlabel("log(thread_pool_size)")
+    ax.set_ylabel("log(batch_size)")
+    ax.set_zlabel("log(time_in_seconds)")
+    ax.set_title("3D Plot (Logged):\nthread_pool_size & batch_size vs. time_in_seconds\n(Color = log(time_in_seconds))\nOptimal Predicted Surface (file_count = {})".format(fixed_file_count))
     
-    # Create a custom legend entry for the surface using a valid color (red)
+    # Create a custom legend entry for the surface (using a valid color, e.g., red)
     from matplotlib.lines import Line2D
     custom_line = Line2D([0], [0], color="red", lw=4)
-    ax.legend([custom_line], ["Optimal log(Concurrency) Surface"], loc="best")
+    ax.legend([custom_line], ["Optimal Predicted Surface"], loc="best")
     
     plt.tight_layout()
     plt.show()
