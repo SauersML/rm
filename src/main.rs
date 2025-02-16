@@ -373,19 +373,17 @@ fn run_deletion_rayon(
     Ok(())
 }
 
-/// Compute the optimal concurrency level
-/// Model: optimal concurrency = e^((1.6063) + (0.6350 * log(CPUs)) - (0.0909 * log((NumFiles + 1))))
-fn compute_optimal_tokio(num_files: usize) -> usize {
-    let num_files_f = num_files as f64;
-
-    // Compute the optimal concurrency using the cached N_CPUS_F
-    let optimal_concurrency =
-        (1.6063 + 0.6350 * N_CPUS_F.ln() - 0.0909 * (num_files_f + 1.0).ln()).exp();
-
-    // Round the result
-    let candidate = optimal_concurrency.round() as usize;
-    candidate
+#[inline(always)]
+pub fn compute_optimal_tokio(num_files: usize, simulated_cpus: usize) -> f64 {
+    // Convert the number of files to a float and compute its natural logarithm
+    let ln_num_files = (num_files as f64).ln();
+    // Convert the number of simulated CPUs to a float and compute its natural logarithm
+    let ln_simulated_cpus = (simulated_cpus as f64).ln();
+    // Compute the optimal concurrency using the derived model:
+    let optimal_concurrency = 23.7282581922052 * (0.138095238095238 * ln_num_files * ln_simulated_cpus - 0.552380952380952 * ln_num_files).exp();
+    optimal_concurrency
 }
+
 
 #[inline(always)]
 pub fn compute_optimal_rayon(file_count: usize) -> (f64, f64) {
