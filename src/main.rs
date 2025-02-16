@@ -540,8 +540,6 @@ fn collect_matching_files(
     dir: &Path,
     matcher: &GlobSet,
 ) -> io::Result<(RawFd, Vec<CString>)> {
-    use std::ffi::{CString, OsStr};
-    use std::os::unix::ffi::OsStrExt;
     // Convert the directory path into a CString.
     let c_path = CString::new(dir.as_os_str().as_bytes()).map_err(|_| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, "Directory path contains null byte")
