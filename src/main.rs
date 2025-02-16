@@ -606,10 +606,6 @@ fn run_deletion_rayon(
     matched_files: Vec<std::ffi::CString>,
     matched_files_number: usize,
 ) -> std::io::Result<()> {
-    use rayon::prelude::*;
-    use rayon::ThreadPoolBuilder;
-    use crossbeam::channel;
-    use std::sync::Arc;
     
     // Compute optimal thread pool size and batch size.
     let (optimal_thread_pool, optimal_batch) = compute_optimal_rayon(matched_files_number);
