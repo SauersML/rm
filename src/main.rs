@@ -384,18 +384,22 @@ fn compute_optimal_concurrency_tokio(num_files: usize) -> usize {
     candidate
 }
 
-/// Compute the optimal concurrency level
-/// Model: optimal concurrency = e^((1.6063) + (0.6350 * log(CPUs)) - (0.0909 * log((NumFiles + 1))))
-fn compute_optimal_concurrency_rayon(num_files: usize) -> usize {
-    let num_files_f = num_files as f64;
+#[inline(always)]
+pub fn compute_optimal_rayon(file_count: usize) -> (f64, f64) {
+    // Compute natural logarithm of file_count.
+    let log_file_count = (file_count as f64).ln();
+    // Precompute square of log_file_count.
+    let log_file_count_squared = log_file_count * log_file_count;
 
-    // Compute the optimal concurrency using the cached N_CPUS_F
-    let optimal_concurrency =
-        (1.6063 + 0.6350 * N_CPUS_F.ln() - 0.0909 * (num_files_f + 1.0).ln()).exp();
+    // Compute optimal thread_pool_size:
+    // exp((169000.0 - 49112.0 * log_file_count) / (27.0 * log_file_count^2 - 91936.0))
+    let optimal_thread_pool_size = ((169_000.0 - 49_112.0 * log_file_count) / (27.0 * log_file_count_squared - 91_936.0)).exp();
 
-    // Round the result
-    let candidate = optimal_concurrency.round() as usize;
-    candidate
+    // Compute optimal batch_size:
+    // exp((9171.0 * log_file_count^2 - 29250.0 * log_file_count - 2284256.0) / (81.0 * log_file_count^2 - 275808.0))
+    let optimal_batch_size = ((9_171.0 * log_file_count_squared - 29_250.0 * log_file_count - 2_284_256.0) / (81.0 * log_file_count_squared - 275_808.0)).exp();
+
+    (optimal_thread_pool_size, optimal_batch_size)
 }
 
 /// Collects matching filenames from the given directory using `collect_matching_files`.
