@@ -1724,6 +1724,7 @@ mod tokio_tune {
 
 
 // cargo test --release -- --nocapture file_count_tests
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod file_count_tests {
     use std::ffi::{CStr, CString};
