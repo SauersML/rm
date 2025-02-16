@@ -537,67 +537,130 @@ fn collect_matching_files(
         }
         
         #[cfg(target_os = "macos")]
-        extern "C" {
-            pub fn getdirentries(
-                fd: libc::c_int,
-                buf: *mut libc::c_char,
-                nbytes: libc::c_int,
-                basep: *mut libc::c_long,
-            ) -> libc::c_int;
-        }
+        mod macos_dirent {
+            use std::io;
+            use std::ffi::{CString, CStr};
+            use std::os::unix::io::RawFd;
+            use std::mem;
         
-        #[cfg(target_os = "macos")]
-
-        // 'base' is only used to receive the updated offset.
-        let mut base: libc::c_long = 0;
-        loop {
-            // Read a block of directory entries.
-            let nread = getdirentries(
-                fd,
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf_size as libc::c_int,
-                &mut base,
-            );
-            if nread < 0 {
-                libc::close(fd);
-                return Err(std::io::Error::last_os_error());
+            pub struct DirEntry {
+                name: CString,
+                file_type: u8,
             }
-            if nread == 0 {
-                break; // End of directory reached.
-            }
-    
-            let mut bpos = 0;
-            while bpos < nread as usize {
-                let d = buf.as_ptr().add(bpos) as *const libc::dirent;
-                let reclen = (*d).d_reclen as usize;
-                let name_ptr = (*d).d_name.as_ptr();
-    
-                // Compute the length of the filename.
-                let mut namelen = 0;
-                while *name_ptr.add(namelen) != 0 {
-                    namelen += 1;
+        
+            impl DirEntry {
+                pub fn name(&self) -> &CStr {
+                    &self.name
                 }
-    
-                // Process the entry if it's not "." or "..".
-                if namelen > 0 {
-                    let name_slice = std::slice::from_raw_parts(name_ptr as *const u8, namelen);
-                    if name_slice != b"." && name_slice != b".." {
-                        // Only consider regular files.
-                        if (*d).d_type == libc::DT_REG {
-                            let os_str = std::ffi::OsStr::from_bytes(name_slice);
-                            // Check if the filename matches the globset.
-                            if matcher.is_match(os_str) {
-                                // Convert the filename to a CString and add it to our vector.
-                                if let Ok(cstr_filename) = std::ffi::CString::new(name_slice) {
-                                    files.push(cstr_filename);
-                                }
-                            }
-                        }
+        
+                pub fn file_type(&self) -> u8 {
+                    self.file_type
+                }
+            }
+        
+            pub struct DirectoryIterator {
+                fd: RawFd,
+                buffer: Vec<u8>,
+                buffer_pos: usize,
+                bytes_read: usize,
+            }
+        
+            impl DirectoryIterator {
+                pub fn new(fd: RawFd) -> io::Result<Self> {
+                    let buffer_size = 64 * 1024; // 64KB
+                    Ok(DirectoryIterator {
+                        fd,
+                        buffer: vec![0; buffer_size],
+                        buffer_pos: 0,
+                        bytes_read: 0,
+                    })
+                }
+        
+                fn read_next_block(&mut self) -> io::Result<()> {
+                    let mut basep: libc::off_t = 0;
+                    let nread = unsafe {
+                        getdirentries(
+                            self.fd,
+                            self.buffer.as_mut_ptr() as *mut libc::c_char,
+                            self.buffer.len() as libc::size_t,
+                            &mut basep, // Pass a mutable pointer to basep
+                        )
+                    };
+                    if nread < 0 {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        self.bytes_read = nread as usize;
+                        self.buffer_pos = 0;
+                        Ok(())
                     }
                 }
-                bpos += reclen;
+            }
+        
+            impl Iterator for DirectoryIterator {
+                type Item = io::Result<DirEntry>;
+        
+                fn next(&mut self) -> Option<Self::Item> {
+                    if self.buffer_pos >= self.bytes_read {
+                        if let Err(e) = self.read_next_block() {
+                            return if e.kind() == io::ErrorKind::UnexpectedEof {
+                                None // End of directory
+                            } else {
+                                Some(Err(e)) // Propagate other errors
+                            };
+                        }
+                        if self.bytes_read == 0 {
+                            return None;
+                        }
+                    }
+        
+                    unsafe {
+                        let d = self.buffer.as_ptr().add(self.buffer_pos) as *const libc::dirent;
+                        let reclen = (*d).d_reclen as usize;
+                        let name_ptr = (*d).d_name.as_ptr();
+                        let name = CStr::from_ptr(name_ptr);
+                        let name_bytes = name.to_bytes(); // Get &str without null
+        
+                        // Skip "." and ".."
+                        if name_bytes == b"." || name_bytes == b".." {
+                            self.buffer_pos += reclen;
+                            return self.next(); // Recursive call to skip
+                        }
+                        let cstr_name = match CString::new(name_bytes) {
+                            Ok(c_str) => c_str,
+                            Err(_) => {
+                                // Handle the null byte error by skipping this file.
+                                self.buffer_pos += reclen;
+                                return self.next();
+                            }
+                        };
+        
+                        let entry = DirEntry {
+                            name: cstr_name,
+                            file_type: (*d).d_type,
+                        };
+        
+                        self.buffer_pos += reclen;
+                        Some(Ok(entry))
+                    }
+                }
+            }
+        
+            pub fn read_dir(fd: RawFd) -> io::Result<DirectoryIterator> {
+                DirectoryIterator::new(fd)
+            }
+        
+            extern "C" {
+                pub fn getdirentries(
+                    fd: libc::c_int,
+                    buf: *mut libc::c_char,
+                    nbytes: libc::size_t,
+                    basep: *mut libc::off_t,
+                ) -> libc::ssize_t;
             }
         }
+
+        #[cfg(target_os = "macos")]
+        use macos_dirent::read_dir;
 
         // At this point, we do NOT close(fd). We return it alongside the filenames.
         Ok((fd, files))
