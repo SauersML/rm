@@ -538,54 +538,70 @@ fn collect_matching_files(
 
         #[cfg(target_os = "macos")]
         extern "C" {
-            pub fn getdirentries(fd: libc::c_int, buf: *mut libc::c_char, nbytes: libc::c_int, basep: *mut libc::c_long) -> libc::c_int;
+            pub fn getdirentries(
+                fd: libc::c_int,
+                buf: *mut libc::c_char,
+                nbytes: libc::c_int,
+                basep: *mut libc::c_long,
+            ) -> libc::c_int;
         }
-
+        
         #[cfg(target_os = "macos")]
         {
+            // The 'base' variable is used only as an output parameter.
+            // getdirentries writes the current file offset here,
+            // but macOS manages the directory position internally.
             let mut base: libc::c_long = 0;
             loop {
-                let nread = { getdirentries(
-                    fd,
-                    buf.as_mut_ptr() as *mut libc::c_char,
-                    buf_size as libc::c_int,
-                    &mut base
-                ) };
+                // Call getdirentries, which updates 'base' internally.
+                let nread = unsafe {
+                    getdirentries(
+                        fd,
+                        buf.as_mut_ptr() as *mut libc::c_char,
+                        buf_size as libc::c_int,
+                        &mut base,
+                    )
+                };
+        
                 if nread < 0 {
-                    libc::close(fd);
+                    unsafe { libc::close(fd); }
                     return Err(std::io::Error::last_os_error());
                 }
                 if nread == 0 {
-                    break;
+                    break; // End of directory reached.
                 }
+        
                 let mut bpos = 0;
                 while bpos < nread as usize {
-                    let d = buf.as_ptr().add(bpos) as *const libc::dirent;
-                    let reclen = (*d).d_reclen as usize;
-                    let name_ptr = (*d).d_name.as_ptr();
-
-                    // Determine the length of the filename (until null terminator)
+                    // Interpret the current position in the buffer as a dirent.
+                    let d = unsafe { buf.as_ptr().add(bpos) as *const libc::dirent };
+                    let reclen = unsafe { (*d).d_reclen as usize };
+                    let name_ptr = unsafe { (*d).d_name.as_ptr() };
+        
+                    // Compute the length of the filename (null terminated).
                     let mut namelen = 0;
-                    while *name_ptr.add(namelen) != 0 {
+                    while unsafe { *name_ptr.add(namelen) } != 0 {
                         namelen += 1;
                     }
-
-                    // Skip entries for "." and ".."
+        
+                    // Skip "." and ".." entries.
                     if namelen > 0 {
-                        let name_slice = std::slice::from_raw_parts(name_ptr as *const u8, namelen);
+                        let name_slice = unsafe {
+                            std::slice::from_raw_parts(name_ptr as *const u8, namelen)
+                        };
                         if name_slice != b"." && name_slice != b".." {
                             // Only consider regular files.
-                            if (*d).d_type == libc::DT_REG {
+                            if unsafe { (*d).d_type } == libc::DT_REG {
                                 let os_str = std::ffi::OsStr::from_bytes(name_slice);
-                                // Use globset matcher to check if the filename matches.
+                                // Check if the filename matches the globset.
                                 if matcher.is_match(os_str) {
-                                    // Store just the base name in the vector.
+                                    // Convert the filename to a CString.
                                     match std::ffi::CString::new(name_slice) {
                                         Ok(cstr_filename) => {
                                             files.push(cstr_filename);
                                         }
                                         Err(_) => {
-                                            // If there's a null byte in the filename, skip.
+                                            // Skip filenames that contain null bytes.
                                         }
                                     }
                                 }
@@ -596,7 +612,6 @@ fn collect_matching_files(
                 }
             }
         }
-
         // At this point, we do NOT close(fd). We return it alongside the filenames.
         Ok((fd, files))
     }
