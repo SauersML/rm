@@ -17,6 +17,8 @@ use globset::{Glob, GlobSetBuilder};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use crossbeam::channel;
+use std::ffi::OsStr;
+use globset::GlobSet;
 
 lazy_static! {
     // Cache the number of CPUs and its f64 conversion as a static variable.
@@ -453,96 +455,135 @@ fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>)>> {
 /// Returns an `io::Result<(RawFd, Vec<CString>)>` containing:
 ///   1. A file descriptor (open directory) to be used with `unlinkat`.
 ///   2. A list of matching filenames (as CStrings), not full paths.
+#[cfg(target_os = "linux")]
 fn collect_matching_files(
-    dir: &std::path::Path,
-    matcher: &globset::GlobSet,
-) -> std::io::Result<(std::os::unix::io::RawFd, Vec<std::ffi::CString>)> {
-    // Open the directory using the raw syscall interface
-    let c_path = std::ffi::CString::new(dir.as_os_str().as_bytes()).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "Directory path contains null byte")
+    dir: &Path,
+    matcher: &GlobSet,
+) -> io::Result<(RawFd, Vec<CString>)> {
+    // Convert the directory path into a CString.
+    let c_path = CString::new(dir.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "Directory path contains null byte")
     })?;
-
+    
     unsafe {
+        // Open the directory with open(2).
         let fd = libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
         if fd < 0 {
-            return Err(std::io::Error::last_os_error());
+            return Err(io::Error::last_os_error());
         }
-        #[cfg(target_os = "linux")]
-        {
-            libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
-        }
-        #[cfg(target_os = "macos")]
-        {
-            libc::fcntl(fd, libc::F_RDADVISE, 0);
-        }
-
-        // Allocate a large buffer to minimize syscall overhead
+        
+        // Advise the kernel for sequential read.
+        libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+        
+        // Allocate a large buffer to minimize syscall overhead.
         let buf_size = 1 << 26; // 64 MB
         let mut buf = vec![0u8; buf_size];
         let mut files = Vec::new();
-
-        #[cfg(target_os = "linux")]
-        {
-            loop {
-                let nread = libc::syscall(
-                    libc::SYS_getdents64,
-                    fd,
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf_size,
-                );
-                if nread < 0 {
-                    libc::close(fd);
-                    return Err(std::io::Error::last_os_error());
+        
+        loop {
+            // Read directory entries using the getdents64 syscall.
+            let nread = libc::syscall(
+                libc::SYS_getdents64,
+                fd,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf_size,
+            );
+            if nread < 0 {
+                libc::close(fd);
+                return Err(io::Error::last_os_error());
+            }
+            if nread == 0 {
+                break; // End of directory stream.
+            }
+            let mut bpos = 0;
+            while bpos < nread as usize {
+                let d = buf.as_ptr().add(bpos) as *const libc::dirent64;
+                let reclen = (*d).d_reclen as usize;
+                let name_ptr = (*d).d_name.as_ptr();
+                // Compute the length of the filename by scanning for the null terminator.
+                let mut namelen = 0;
+                while *name_ptr.add(namelen) != 0 {
+                    namelen += 1;
                 }
-                if nread == 0 {
-                    break;
-                }
-                let mut bpos = 0;
-                while bpos < nread as usize {
-                    let d = buf.as_ptr().add(bpos) as *const libc::dirent64;
-                    let reclen = (*d).d_reclen as usize;
-                    let name_ptr = (*d).d_name.as_ptr();
-
-                    // Determine the length of the filename (until null terminator)
-                    let mut namelen = 0;
-                    while *name_ptr.add(namelen) != 0 {
-                        namelen += 1;
-                    }
-
-                    // Skip entries for "." and ".."
-                    if namelen > 0 {
-                        let name_slice = std::slice::from_raw_parts(name_ptr as *const u8, namelen);
-                        if name_slice != b"." && name_slice != b".." {
-                            // Only consider regular files.
-                            if (*d).d_type == libc::DT_REG {
-                                let os_str = std::ffi::OsStr::from_bytes(name_slice);
-                                // Use globset matcher to check if the filename matches.
-                                if matcher.is_match(os_str) {
-                                    // Store just the base name in the vector.
-                                    match std::ffi::CString::new(name_slice) {
-                                        Ok(cstr_filename) => {
-                                            files.push(cstr_filename);
-                                        }
-                                        Err(_) => {
-                                            // If there's a null byte in the filename, skip.
-                                        }
-                                    }
+                if namelen > 0 {
+                    let name_slice = std::slice::from_raw_parts(name_ptr as *const u8, namelen);
+                    if name_slice != b"." && name_slice != b".." {
+                        if (*d).d_type == libc::DT_REG {
+                            let os_str = OsStr::from_bytes(name_slice);
+                            if matcher.is_match(os_str) {
+                                if let Ok(cstr_filename) = CString::new(name_slice) {
+                                    files.push(cstr_filename);
                                 }
                             }
                         }
                     }
-                    bpos += reclen;
                 }
+                bpos += reclen;
             }
         }
-        
-        #[cfg(target_os = "macos")]
-        # ???
-
-        // At this point, we do NOT close(fd). We return it alongside the filenames.
+        // Do not close(fd); caller is responsible.
         Ok((fd, files))
     }
 }
+
+#[cfg(target_os = "macos")]
+fn collect_matching_files(
+    dir: &Path,
+    matcher: &GlobSet,
+) -> io::Result<(RawFd, Vec<CString>)> {
+    // Convert the directory path into a CString.
+    let c_path = CString::new(dir.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "Directory path contains null byte")
+    })?;
+    
+    unsafe {
+        // Open the directory using opendir (returns a DIR*).
+        let dir_stream = libc::opendir(c_path.as_ptr());
+        if dir_stream.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        
+        // Get the raw file descriptor associated with the directory stream.
+        let mac_fd = libc::dirfd(dir_stream);
+        if mac_fd < 0 {
+            libc::closedir(dir_stream);
+            return Err(io::Error::last_os_error());
+        }
+        
+        // Set read-ahead advice.
+        libc::fcntl(mac_fd, libc::F_RDADVISE, 0);
+        
+        let mut files = Vec::new();
+        loop {
+            // Read a directory entry.
+            let entry_ptr = libc::readdir(dir_stream);
+            if entry_ptr.is_null() {
+                // End of stream.
+                break;
+            }
+            let entry = &*entry_ptr;
+            // Process only regular files.
+            if entry.d_type == libc::DT_REG {
+                let name_len = entry.d_namlen as usize;
+                let name_slice = std::slice::from_raw_parts(entry.d_name.as_ptr() as *const u8, name_len);
+                if name_slice == b"." || name_slice == b".." {
+                    continue;
+                }
+                let os_str = OsStr::from_bytes(name_slice);
+                if matcher.is_match(os_str) {
+                    if let Ok(cstr_filename) = CString::new(name_slice) {
+                        files.push(cstr_filename);
+                    }
+                }
+            }
+        }
+        // Close the directory stream (we do not close the file descriptor here).
+        libc::closedir(dir_stream);
+        // Return the file descriptor obtained via dirfd and the matching filenames.
+        return Ok((mac_fd, files));
+    }
+}
+
 
 
 // ====================================================================================================================================
