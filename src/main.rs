@@ -467,7 +467,7 @@ fn collect_matching_files(
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+        #[cfg(target_os = "linux")] unsafe { libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL) };
 
         // Allocate a large buffer to minimize syscall overhead
         let buf_size = 1 << 26; // 64 MB
