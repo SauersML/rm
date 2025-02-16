@@ -566,12 +566,6 @@ fn collect_matching_files(
                 break; // End of directory reached.
             }
     
-            // Update the file descriptor's internal offset.
-            if libc::lseek(fd, base, libc::SEEK_SET) < 0 {
-                libc::close(fd);
-                return Err(std::io::Error::last_os_error());
-            }
-    
             let mut bpos = 0;
             while bpos < nread as usize {
                 let d = buf.as_ptr().add(bpos) as *const libc::dirent;
