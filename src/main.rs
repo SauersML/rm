@@ -537,26 +537,28 @@ fn collect_matching_files(
 
 #[cfg(target_os = "macos")]
 fn collect_matching_files(
-    dir: &Path,
-    matcher: &GlobSet,
-) -> io::Result<(RawFd, Vec<CString>)> {
+    dir: &std::path::Path,
+    matcher: &globset::GlobSet,
+) -> std::io::Result<(std::os::unix::io::RawFd, Vec<std::ffi::CString>)> {
+    use std::ffi::{CString, OsStr};
+    use std::os::unix::ffi::OsStrExt;
     // Convert the directory path into a CString.
     let c_path = CString::new(dir.as_os_str().as_bytes()).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "Directory path contains null byte")
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "Directory path contains null byte")
     })?;
     
     unsafe {
         // Open the directory using opendir (returns a DIR*).
         let dir_stream = libc::opendir(c_path.as_ptr());
         if dir_stream.is_null() {
-            return Err(io::Error::last_os_error());
+            return Err(std::io::Error::last_os_error());
         }
         
         // Get the raw file descriptor associated with the directory stream.
         let mac_fd = libc::dirfd(dir_stream);
         if mac_fd < 0 {
             libc::closedir(dir_stream);
-            return Err(io::Error::last_os_error());
+            return Err(std::io::Error::last_os_error());
         }
         
         // Set read-ahead advice.
@@ -567,7 +569,6 @@ fn collect_matching_files(
             // Read a directory entry.
             let entry_ptr = libc::readdir(dir_stream);
             if entry_ptr.is_null() {
-                // End of stream.
                 break;
             }
             let entry = &*entry_ptr;
@@ -580,32 +581,37 @@ fn collect_matching_files(
                 }
                 let os_str = OsStr::from_bytes(name_slice);
                 if matcher.is_match(os_str) {
-                    if let Ok(cstr_filename) = CString::new(name_slice) {
-                        files.push(cstr_filename);
+                    // Form the full path by joining the directory path with the filename.
+                    let full_path = dir.join(os_str);
+                    if let Ok(full_path_cstr) =
+                        CString::new(full_path.as_os_str().as_bytes())
+                    {
+                        files.push(full_path_cstr);
                     }
                 }
             }
         }
-        // Close the directory stream (we do not close the file descriptor here).
+        // Close the directory stream.
         libc::closedir(dir_stream);
-        // Return the file descriptor obtained via dirfd and the matching filenames.
-        return Ok((mac_fd, files));
+        Ok((mac_fd, files))
     }
 }
 
-
-/// Synchronous deletion using Rayon for macOS.
-/// This function deletes files in parallel by always calling `libc::unlink()` and
-/// ignores the directory file descriptor.
+#[cfg(target_os = "macos")]
 fn run_deletion_rayon(
     thread_pool_size: Option<usize>,
     batch_size_override: Option<usize>,
-    // On macOS, the FD passed in is not used for deletion.
-    _fd: RawFd,
-    matched_files: Vec<CString>,
+    // On macOS, the file descriptor is not used for deletion.
+    _fd: std::os::unix::io::RawFd,
+    matched_files: Vec<std::ffi::CString>,
     matched_files_number: usize,
-) -> io::Result<()> {
-    // Compute the optimal thread pool size and batch size.
+) -> std::io::Result<()> {
+    use rayon::prelude::*;
+    use rayon::ThreadPoolBuilder;
+    use crossbeam::channel;
+    use std::sync::Arc;
+    
+    // Compute optimal thread pool size and batch size.
     let (optimal_thread_pool, optimal_batch) = compute_optimal_rayon(matched_files_number);
     let concurrency = thread_pool_size.unwrap_or_else(|| optimal_thread_pool.round() as usize);
     let batch_size = batch_size_override.unwrap_or_else(|| optimal_batch.round() as usize);
@@ -625,7 +631,7 @@ fn run_deletion_rayon(
     };
     let pb = Arc::new(Bar::new(matched_files_number as u64, config));
 
-    // We'll send completed counts in batches to the progress bar thread.
+    // Create a channel to send deletion counts.
     let (sender, receiver) = channel::unbounded::<usize>();
 
     // Spawn a thread to update the progress bar.
@@ -637,37 +643,35 @@ fn run_deletion_rayon(
                 total_done += batch_count;
                 pb.inc(batch_count as u64);
             }
-            // If for some reason we didn't get the last partial batch, account for it here.
             let remainder = matched_files_number - total_done;
             if remainder > 0 {
                 pb.inc(remainder as u64);
             }
-            // We'll finish the bar later.
         }
     });
 
-    // Build a custom Rayon thread pool with the desired concurrency.
+    // Build a custom Rayon thread pool.
     let pool = ThreadPoolBuilder::new()
         .num_threads(concurrency)
         .build()
         .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to build Rayon thread pool: {}", e),
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to build Rayon thread pool: {}", e)
             )
         })?;
 
-    // Run the parallel deletion inside the custom thread pool.
+    // Execute deletion in parallel.
     pool.install(|| {
         matched_files.par_chunks(batch_size).for_each(|chunk| {
             let mut count = 0;
             for filename_cstr in chunk {
-                // Always use `libc::unlink` on macOS.
+                // Delete using the full path.
                 let result = unsafe { libc::unlink(filename_cstr.as_ptr()) };
                 if result == 0 {
                     count += 1;
                 } else {
-                    let e = io::Error::last_os_error();
+                    let e = std::io::Error::last_os_error();
                     eprintln!(
                         "Failed to delete '{}': {}",
                         filename_cstr.to_string_lossy(),
@@ -676,39 +680,32 @@ fn run_deletion_rayon(
                     std::process::exit(1);
                 }
             }
-            // Send the count of successfully deleted files for this chunk.
             sender.send(count).unwrap();
         });
     });
 
-    // Close the sender so that the progress thread can exit.
     drop(sender);
     pb_thread.join().unwrap();
 
-    // Finish the progress bar.
     match Arc::try_unwrap(pb) {
         Ok(bar) => bar.finish(),
         Err(_) => eprintln!("[WARN] Could not get exclusive ownership of progress bar."),
     }
 
-    // NOTE: No need to close the directory FD on macOS as it was handled during file collection.
     Ok(())
 }
 
-
-/// Main async entry point for macOS using Tokio.
-/// This function deletes files using asynchronous tasks and always calls `libc::unlink()`.
+#[cfg(target_os = "macos")]
 async fn run_deletion_tokio<P: ProgressReporter + Clone>(
     concurrency_override: Option<usize>,
     progress_reporter: P,
-    // On macOS, the file descriptor from directory opening is not used for deletion.
-    _fd: RawFd,
-    matched_files: Vec<CString>,
+    // On macOS, the file descriptor is not used for deletion.
+    _fd: std::os::unix::io::RawFd,
+    matched_files: Vec<std::ffi::CString>,
     matched_files_number: usize,
-) -> io::Result<()> {
+) -> std::io::Result<()> {
     let concurrency = concurrency_override.unwrap_or_else(|| {
-        compute_optimal_tokio(matched_files_number, num_cpus::get())
-            .round() as usize
+        compute_optimal_tokio(matched_files_number, num_cpus::get()).round() as usize
     });
     println!(
         "[INFO] Deleting {} files with concurrency = {} (CPU cores = {})",
@@ -719,18 +716,15 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
 
     let file_stream = futures::stream::iter(matched_files.into_iter());
     let pr_for_tasks = progress_reporter.clone();
-
     file_stream
         .for_each_concurrent(Some(concurrency), move |filename_cstr| {
             let progress_reporter_value = pr_for_tasks.clone();
             async move {
-                // On macOS, we always call `libc::unlink` to delete the file.
                 let result = unsafe { libc::unlink(filename_cstr.as_ptr()) };
-
                 if result == 0 {
                     progress_reporter_value.inc(1);
                 } else {
-                    let e = io::Error::last_os_error();
+                    let e = std::io::Error::last_os_error();
                     eprintln!(
                         "Failed to delete '{}': {}",
                         filename_cstr.to_string_lossy(),
@@ -743,7 +737,6 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
         .await;
 
     progress_reporter.finish();
-    // NOTE: We do not close the directory FD here since it was already closed after collection.
     Ok(())
 }
 
