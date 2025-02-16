@@ -11,10 +11,9 @@ use futures::StreamExt;
 use num_cpus;
 use lazy_static::lazy_static;
 use progression::{Bar, Config};
-use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{Glob, GlobSetBuilder};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use crossbeam::channel;
@@ -541,12 +540,12 @@ fn collect_matching_files(
         {
             let mut base: libc::c_long = 0;
             loop {
-                let nread = libc::getdirentries(
+                let nread = unsafe { getdirentries(
                     fd,
                     buf.as_mut_ptr() as *mut libc::c_char,
                     buf_size as libc::c_int,
-                    &mut base,
-                );
+                    &mut base
+                ) };
                 if nread < 0 {
                     libc::close(fd);
                     return Err(std::io::Error::last_os_error());
