@@ -276,11 +276,14 @@ fn run_deletion_rayon(
     matched_files: Vec<CString>,
     matched_files_number: usize,
 ) -> io::Result<()> {
-    // If no thread pool size was given, compute one automatically
-    let concurrency = thread_pool_size.unwrap_or_else(|| compute_optimal_rayon(matched_files_number));
+    // Compute optimal thread pool and batch size
+    let (optimal_thread_pool, optimal_batch) = compute_optimal_rayon(matched_files_number);
 
-    // If no batch size was given, pick a default
-    let batch_size = batch_size_override.unwrap_or(5000);
+    // If no thread pool size was provided, use the computed optimal thread pool size (rounded to the nearest usize).
+    let concurrency = thread_pool_size.unwrap_or_else(|| optimal_thread_pool.round() as usize);
+
+    // If no batch size override was provided, use the computed optimal batch size (rounded to the nearest usize).
+    let batch_size = batch_size_override.unwrap_or_else(|| optimal_batch.round() as usize);
 
     println!(
         "[INFO] Deleting {} files using Rayon with concurrency = {}, batch_size = {} (CPU cores = {})",
