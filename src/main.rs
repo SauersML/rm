@@ -453,9 +453,9 @@ fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>)>> {
 
 #[cfg(target_os = "linux")]
 fn collect_matching_files(
-    dir: &std::path::Path,
-    matcher: &globset::GlobSet,
-) -> std::io::Result<(std::os::unix::io::RawFd, Vec<std::ffi::CString>)> {
+    dir: &Path,
+    matcher: &GlobSet,
+) -> io::Result<(RawFd, Vec<CString>)>
     // Open the directory using the raw syscall interface
     let c_path = std::ffi::CString::new(dir.as_os_str().as_bytes()).map_err(|_| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, "Directory path contains null byte")
@@ -507,7 +507,7 @@ fn collect_matching_files(
                         if name_slice != b"." && name_slice != b".." {
                             // Only consider regular files.
                             if (*d).d_type == libc::DT_REG {
-                                let os_str = std::ffi::OsStr::from_bytes(name_slice);
+                                let os_str = OsStr::from_bytes(name_slice);
                                 // Use globset matcher to check if the filename matches.
                                 if matcher.is_match(os_str) {
                                     // Store just the base name in the vector.
@@ -537,9 +537,9 @@ fn collect_matching_files(
 
 #[cfg(target_os = "macos")]
 fn collect_matching_files(
-    dir: &std::path::Path,
-    matcher: &globset::GlobSet,
-) -> std::io::Result<(std::os::unix::io::RawFd, Vec<std::ffi::CString>)> {
+    dir: &Path,
+    matcher: &GlobSet,
+) -> io::Result<(RawFd, Vec<CString>)>
     use std::ffi::{CString, OsStr};
     use std::os::unix::ffi::OsStrExt;
     // Convert the directory path into a CString.
