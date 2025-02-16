@@ -247,7 +247,43 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
                 let progress_reporter_value = pr_for_tasks.clone();
                 async move {
                     let progress_reporter = progress_reporter_value.clone();
-                    let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
+                    let result = {
+                        #[cfg(target_os = "macos")]
+                        {
+                            // Duplicate the directory fd so we have a valid, independent directory descriptor.
+                            let dir_fd = unsafe { libc::dup(fd) };
+                            if dir_fd < 0 {
+                                let e = io::Error::last_os_error();
+                                eprintln!("Failed to duplicate directory fd: {}", e);
+                                std::process::exit(1);
+                            }
+                        
+                            // Temporarily change the current working directory to the directory represented by dir_fd
+                            if unsafe { libc::fchdir(dir_fd) } != 0 {
+                                let e = io::Error::last_os_error();
+                                eprintln!("Failed to change directory: {}", e);
+                                std::process::exit(1);
+                            }
+                        
+                            // Now unlink the file (filename_cstr is the relative filename)
+                            let result = unsafe { libc::unlink(filename_cstr.as_ptr()) };
+                        
+                            // Attempt to change back to the directory
+                            if unsafe { libc::fchdir(dir_fd) } != 0 {
+                                let e = io::Error::last_os_error();
+                                eprintln!("Failed to change directory back: {}", e);
+                            }
+                        
+                            // Close the duplicated directory fd
+                            unsafe { libc::close(dir_fd) };
+                        
+                            result
+                        }
+
+                        #[cfg(not(target_os = "macos"))]
+                        { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) }
+                    };
+
                     if result == 0 {
                         progress_reporter.inc(1);
                     } else {
@@ -338,7 +374,12 @@ fn run_deletion_rayon(
         matched_files.par_chunks(batch_size).for_each(|chunk| {
             let mut count = 0;
             for filename_cstr in chunk {
-                let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
+                let result = unsafe {
+                    #[cfg(target_os = "macos")]
+                    { libc::unlink(filename_cstr.as_ptr()) }
+                    #[cfg(not(target_os = "macos"))]
+                    { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) }
+                };
                 if result == 0 {
                     count += 1;
                 } else {
