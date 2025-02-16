@@ -248,39 +248,6 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
                 async move {
                     let progress_reporter = progress_reporter_value.clone();
                     let result = {
-                        #[cfg(target_os = "macos")]
-                        {
-                            // Duplicate the directory fd so we have a valid, independent directory descriptor.
-                            let dir_fd = unsafe { libc::dup(fd) };
-                            if dir_fd < 0 {
-                                let e = io::Error::last_os_error();
-                                eprintln!("Failed to duplicate directory fd: {}", e);
-                                std::process::exit(1);
-                            }
-                        
-                            // Temporarily change the current working directory to the directory represented by dir_fd
-                            if unsafe { libc::fchdir(dir_fd) } != 0 {
-                                let e = io::Error::last_os_error();
-                                eprintln!("Failed to change directory: {}", e);
-                                std::process::exit(1);
-                            }
-                        
-                            // Now unlink the file (filename_cstr is the relative filename)
-                            let result = unsafe { libc::unlink(filename_cstr.as_ptr()) };
-                        
-                            // Attempt to change back to the directory
-                            if unsafe { libc::fchdir(dir_fd) } != 0 {
-                                let e = io::Error::last_os_error();
-                                eprintln!("Failed to change directory back: {}", e);
-                            }
-                        
-                            // Close the duplicated directory fd
-                            unsafe { libc::close(dir_fd) };
-                        
-                            result
-                        }
-
-                        #[cfg(not(target_os = "macos"))]
                         { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) }
                     };
 
