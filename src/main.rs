@@ -537,10 +537,15 @@ fn collect_matching_files(
         }
 
         #[cfg(target_os = "macos")]
+        extern "C" {
+            pub fn getdirentries(fd: libc::c_int, buf: *mut libc::c_char, nbytes: libc::c_int, basep: *mut libc::c_long) -> libc::c_int;
+        }
+
+        #[cfg(target_os = "macos")]
         {
             let mut base: libc::c_long = 0;
             loop {
-                let nread = unsafe { getdirentries(
+                let nread = { getdirentries(
                     fd,
                     buf.as_mut_ptr() as *mut libc::c_char,
                     buf_size as libc::c_int,
