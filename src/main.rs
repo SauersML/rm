@@ -1499,7 +1499,7 @@ mod performance_tests {
 }
 
 
-// cargo test --release -- --nocapture test_grid
+// cargo test --release -- --nocapture tokio_tune
 #[cfg(test)]
 mod tokio_tune {
     use super::{count_matches, run_deletion_tokio, NoOpProgressBar, Progress};
