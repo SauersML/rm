@@ -1501,7 +1501,7 @@ mod performance_tests {
 
 // cargo test --release -- --nocapture test_grid
 #[cfg(test)]
-mod test_grid {
+mod tokio_tune {
     use super::{count_matches, run_deletion_tokio, NoOpProgressBar, Progress};
     use std::fs::{File, OpenOptions};
     use std::io::{BufWriter, Write};
