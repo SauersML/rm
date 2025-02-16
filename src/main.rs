@@ -229,7 +229,7 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
 ) -> io::Result<()> {
     let concurrency = match concurrency_override {
         Some(n) => n,
-        None => compute_optimal_concurrency_tokio(matched_files_number),
+        None => compute_optimal_tokio(matched_files_number),
     };
     println!(
         "[INFO] Deleting {} files with concurrency = {} (CPU cores = {})",
@@ -277,7 +277,7 @@ fn run_deletion_rayon(
     matched_files_number: usize,
 ) -> io::Result<()> {
     // If no thread pool size was given, compute one automatically
-    let concurrency = thread_pool_size.unwrap_or_else(|| compute_optimal_concurrency_rayon(matched_files_number));
+    let concurrency = thread_pool_size.unwrap_or_else(|| compute_optimal_rayon(matched_files_number));
 
     // If no batch size was given, pick a default
     let batch_size = batch_size_override.unwrap_or(5000);
@@ -372,7 +372,7 @@ fn run_deletion_rayon(
 
 /// Compute the optimal concurrency level
 /// Model: optimal concurrency = e^((1.6063) + (0.6350 * log(CPUs)) - (0.0909 * log((NumFiles + 1))))
-fn compute_optimal_concurrency_tokio(num_files: usize) -> usize {
+fn compute_optimal_tokio(num_files: usize) -> usize {
     let num_files_f = num_files as f64;
 
     // Compute the optimal concurrency using the cached N_CPUS_F
