@@ -455,7 +455,7 @@ fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>)>> {
 fn collect_matching_files(
     dir: &Path,
     matcher: &GlobSet,
-) -> io::Result<(RawFd, Vec<CString>)>
+) -> io::Result<(RawFd, Vec<CString>)> {
     // Open the directory using the raw syscall interface
     let c_path = std::ffi::CString::new(dir.as_os_str().as_bytes()).map_err(|_| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, "Directory path contains null byte")
@@ -539,7 +539,7 @@ fn collect_matching_files(
 fn collect_matching_files(
     dir: &Path,
     matcher: &GlobSet,
-) -> io::Result<(RawFd, Vec<CString>)>
+) -> io::Result<(RawFd, Vec<CString>)> {
     use std::ffi::{CString, OsStr};
     use std::os::unix::ffi::OsStrExt;
     // Convert the directory path into a CString.
