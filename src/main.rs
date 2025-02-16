@@ -229,7 +229,7 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
 ) -> io::Result<()> {
     let concurrency = match concurrency_override {
         Some(n) => n,
-        None => compute_optimal_tokio(matched_files_number),
+        None => compute_optimal_tokio(matched_files_number, num_cpus::get()).round() as usize,
     };
     println!(
         "[INFO] Deleting {} files with concurrency = {} (CPU cores = {})",
