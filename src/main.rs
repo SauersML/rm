@@ -147,7 +147,7 @@ fn main() {
             }
         }
     } else {
-        "tokio"
+        "rayon"
     };
 
     // Call count_matches to get the file descriptor, matched files, and total count.
