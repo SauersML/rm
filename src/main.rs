@@ -594,15 +594,15 @@ fn collect_matching_files(
 }
 
 #[cfg(target_os = "macos")]
-fn run_deletion_rayon(
+fn run_deletion_rayon<P: ProgressReporter + Clone + Sync>(
     thread_pool_size: Option<usize>,
     batch_size_override: Option<usize>,
+    progress_reporter: P,
     // On macOS, the file descriptor is not used for deletion.
     _fd: std::os::unix::io::RawFd,
     matched_files: Vec<std::ffi::CString>,
     matched_files_number: usize,
 ) -> std::io::Result<()> {
-    
     // Compute optimal thread pool size and batch size.
     let (optimal_thread_pool, optimal_batch) = compute_optimal_rayon(matched_files_number);
     let concurrency = thread_pool_size.unwrap_or_else(|| optimal_thread_pool.round() as usize);
@@ -616,33 +616,7 @@ fn run_deletion_rayon(
         num_cpus::get()
     );
 
-    // Setup a progress bar.
-    let config = Config {
-        throttle_millis: 250,
-        ..Default::default()
-    };
-    let pb = Arc::new(Bar::new(matched_files_number as u64, config));
-
-    // Create a channel to send deletion counts.
-    let (sender, receiver) = channel::unbounded::<usize>();
-
-    // Spawn a thread to update the progress bar.
-    let pb_thread = std::thread::spawn({
-        let pb = Arc::clone(&pb);
-        move || {
-            let mut total_done = 0;
-            while let Ok(batch_count) = receiver.recv() {
-                total_done += batch_count;
-                pb.inc(batch_count as u64);
-            }
-            let remainder = matched_files_number - total_done;
-            if remainder > 0 {
-                pb.inc(remainder as u64);
-            }
-        }
-    });
-
-    // Build a custom Rayon thread pool.
+    // Build a custom Rayon thread pool with the desired concurrency.
     let pool = ThreadPoolBuilder::new()
         .num_threads(concurrency)
         .build()
@@ -653,15 +627,13 @@ fn run_deletion_rayon(
             )
         })?;
 
-    // Execute deletion in parallel.
+    // Execute deletion in parallel using the provided progress reporter.
     pool.install(|| {
         matched_files.par_chunks(batch_size).for_each(|chunk| {
-            let mut count = 0;
             for filename_cstr in chunk {
-                // Delete using the full path.
                 let result = unsafe { libc::unlink(filename_cstr.as_ptr()) };
                 if result == 0 {
-                    count += 1;
+                    progress_reporter.inc(1);
                 } else {
                     let e = std::io::Error::last_os_error();
                     eprintln!(
@@ -672,20 +644,15 @@ fn run_deletion_rayon(
                     std::process::exit(1);
                 }
             }
-            sender.send(count).unwrap();
         });
     });
 
-    drop(sender);
-    pb_thread.join().unwrap();
-
-    match Arc::try_unwrap(pb) {
-        Ok(bar) => bar.finish(),
-        Err(_) => eprintln!("[WARN] Could not get exclusive ownership of progress bar."),
-    }
+    // Finish progress reporting.
+    progress_reporter.finish();
 
     Ok(())
 }
+
 
 #[cfg(target_os = "macos")]
 async fn run_deletion_tokio<P: ProgressReporter + Clone>(
