@@ -741,7 +741,7 @@ mod simple_shell {
     // Number of burn-in iterations (results not recorded).
     const BURN_IN: usize = 50;
     // Number of files to create per benchmark iteration.
-    const FILE_COUNT: usize = 10;
+    const FILE_COUNT: usize = 1;
 
     /// Returns the base test directory (e.g., "$HOME/tmp_test").
     fn base_test_dir() -> PathBuf {
