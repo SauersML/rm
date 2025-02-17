@@ -3115,7 +3115,7 @@ mod collect_tests {
 // cargo test --release -- --nocapture rayon_tune
 #[cfg(test)]
 mod rayon_tune {
-    use super::{count_matches, run_deletion_rayon, N_CPUS_F};
+    use super::{count_matches, run_deletion_rayon, N_CPUS_F, NoOpProgressBar, Progress};
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::time::Instant;
@@ -3150,7 +3150,8 @@ mod rayon_tune {
                     // Generate `fc` files matching our pattern.
                     for i in 0..fc {
                         let file_path = tmp_dir.path().join(format!("testfile_{}.tmp", i));
-                        std::fs::write(&file_path, b"some test data").unwrap();
+                        std::fs::write(&file_path, b"some test data")
+                            .expect("Failed to write test file");
                     }
 
                     // Construct the glob pattern to match the generated files.
@@ -3174,19 +3175,20 @@ mod rayon_tune {
                     };
                     let num_matches = matched_files.len();
 
+                    // Create a no-op progress reporter.
+                    let progress_reporter = Progress::NoOp(NoOpProgressBar::new());
+
                     // Start timing the deletion.
                     let start = Instant::now();
 
                     // Run the Rayon-based deletion with the chosen concurrency and batch size.
-                    // Note that run_deletion_rayon takes 5 arguments:
-                    // thread_pool_size, batch_size_override, fd, matched_files, matched_files_number.
                     let res = run_deletion_rayon(
-                        None,
-                        None,
+                        Some(concurrency),
+                        Some(bsize),
                         progress_reporter,
                         fd,
                         matched_files,
-                        matched_files_number,
+                        num_matches,
                     );
 
                     let elapsed = start.elapsed();
