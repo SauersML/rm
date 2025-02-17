@@ -182,7 +182,7 @@ fn main() {
                 eprintln!("Error during deletion: {}", e);
                 std::process::exit(1);
             }
-            println!("Files matching '{}' deleted successfully (quick deletion)!", pattern);
+            println!("Files matching '{}' deleted successfully!", pattern);
             std::process::exit(0);
         }
     }
