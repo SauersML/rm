@@ -126,7 +126,7 @@ impl<'a> ProgressReporter for Progress<'a> {
     }
 }
 
-/// Synchronous wrapper around the async function.
+/// Synchronous
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -136,7 +136,7 @@ fn main() {
     }
     let pattern = &args[1];
 
-    // Determine deletion mode: default to tokio if not specified.
+    // Determine deletion mode: default to rayon if not specified.
     let deletion_mode = if args.len() >= 3 {
         match args[2].as_str() {
             "--tokio" => "tokio",
@@ -163,8 +163,32 @@ fn main() {
         }
     };
 
-    // Choose a progress reporter based on the total file count.
     let matched_files_number = matched_files.len();
+
+    // If there are fewer than 10 files, use the fast sequential deletion path
+    if matched_files_number < 10 {
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(e) = sequential_delete(&matched_files, fd) {
+                eprintln!("Error during deletion: {}", e);
+                std::process::exit(1);
+            }
+            unsafe { libc::close(fd) };
+            println!("Files matching '{}' deleted successfully!", pattern);
+            std::process::exit(0);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if let Err(e) = sequential_delete(&matched_files) {
+                eprintln!("Error during deletion: {}", e);
+                std::process::exit(1);
+            }
+            println!("Files matching '{}' deleted successfully (quick deletion)!", pattern);
+            std::process::exit(0);
+        }
+    }
+
+    // Choose a progress reporter based on the total file count.
     let progress_reporter = if matched_files_number < 1000 {
         Progress::NoOp(NoOpProgressBar::new())
     } else {
@@ -219,6 +243,7 @@ fn main() {
         _ => unreachable!(), // We've already validated the deletion_mode.
     }
 }
+
 
 /// Main async entry point
 #[cfg(not(target_os = "macos"))]
