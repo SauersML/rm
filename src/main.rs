@@ -740,6 +740,378 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
 // ====================================================================================================================================
 // ====================================================================================================================================
 
+#[allow(non_snake_case)]
+#[cfg(test)]
+mod simple_shell {
+    use glob::glob;
+    use std::{
+        fs::{self, File},
+        io::Write,
+        path::{Path, PathBuf},
+        process::Command,
+        thread::sleep,
+        time::{Duration, Instant},
+    };
+
+    // Run 1,000 iterations per deletion method.
+    const ITERATIONS: usize = 1000;
+
+    /// Returns the base test directory (e.g., "$HOME/tmp_test").
+    fn base_test_dir() -> PathBuf {
+        let home = std::env::var("HOME").expect("HOME environment variable not set");
+        PathBuf::from(home).join("tmp_test")
+    }
+
+    /// Retrieves filesystem information for the given directory using `df -T`.
+    fn get_filesystem_info(dir: &Path) -> String {
+        let output = Command::new("df")
+            .arg("-T")
+            .arg(dir)
+            .output()
+            .expect("Failed to get filesystem info");
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
+    /// Prepares a fresh test directory for a single benchmark iteration.
+    /// The directory is created at: BASE_TEST_DIR/<test_name>_<command_type>_iter<iteration>
+    fn prepare_test_directory(test_name: &str, command_type: &str, iteration: usize) -> PathBuf {
+        let dir_path = base_test_dir().join(format!(
+            "{}_{}_iter{}",
+            test_name, command_type, iteration
+        ));
+        if dir_path.exists() {
+            fs::remove_dir_all(&dir_path)
+                .unwrap_or_else(|e| panic!("Failed to remove {}: {}", dir_path.display(), e));
+        }
+        fs::create_dir_all(&dir_path)
+            .unwrap_or_else(|e| panic!("Failed to create {}: {}", dir_path.display(), e));
+        println!(
+            "Filesystem info for {}:\n{}",
+            dir_path.display(),
+            get_filesystem_info(&dir_path)
+        );
+        dir_path
+    }
+
+    /// Creates one test file in the specified directory.
+    fn create_test_file(dir: &Path) {
+        let file_path = dir.join("test_file_0.dat");
+        let mut file = File::create(&file_path)
+            .unwrap_or_else(|e| panic!("Failed to create {}: {}", file_path.display(), e));
+        // Write 16 zero bytes
+        let content = vec![0u8; 16];
+        file.write_all(&content)
+            .unwrap_or_else(|e| panic!("Failed to write to {}: {}", file_path.display(), e));
+    }
+
+    /// Verifies that no files matching the provided glob pattern remain.
+    fn verify_no_files(pattern: &str) {
+        let mut count = 0;
+        let mut undeleted_files = Vec::new();
+
+        for entry in glob(pattern).expect("Invalid glob pattern") {
+            match entry {
+                Ok(path) => {
+                    if path.is_file() {
+                        count += 1;
+                        undeleted_files.push(path);
+                    }
+                }
+                Err(e) => eprintln!("DEBUG: Error reading entry: {}", e),
+            }
+        }
+
+        if count > 0 {
+            println!("DEBUG: Found {} undeleted file(s) matching '{}':", count, pattern);
+            for file in undeleted_files {
+                println!("DEBUG: {}", file.display());
+            }
+            panic!(
+                "Deletion failed: {} file(s) still exist matching {}",
+                count, pattern
+            );
+        }
+    }
+
+    /// Executes a shell command (via `sh -c`) and returns the elapsed time (in seconds).
+    /// All pre-/post-command work (syncing, sleeping, file verification) is done outside the timed region.
+    fn run_command(command: &str, pattern: &str) -> f64 {
+        println!("Executing: {}", command);
+
+        // Pre-command sync (not timed)
+        Command::new("sync")
+            .status()
+            .expect("Failed to sync before command");
+
+        let start = Instant::now();
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .output()
+            .unwrap_or_else(|e| panic!("Failed to execute command `{}`: {}", command, e));
+        let elapsed = start.elapsed();
+
+        if !output.status.success() {
+            panic!(
+                "Command `{}` failed:\n{}",
+                command,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // Post-command work (sync, sleep, and verify deletion)
+        Command::new("sync")
+            .status()
+            .expect("Failed to sync after command");
+        sleep(Duration::from_millis(100));
+        verify_no_files(pattern);
+
+        elapsed.as_secs_f64()
+    }
+
+    /// Calculates basic statistics: (min, max, mean, median, stddev).
+    fn calculate_stats(times: &[f64]) -> (f64, f64, f64, f64, f64) {
+        let min = times.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let sum: f64 = times.iter().sum();
+        let mean = sum / times.len() as f64;
+
+        let mut sorted = times.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = if sorted.len() % 2 == 0 {
+            (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
+        } else {
+            sorted[sorted.len() / 2]
+        };
+
+        let variance = times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / times.len() as f64;
+        let stddev = variance.sqrt();
+
+        (min, max, mean, median, stddev)
+    }
+
+    /// Computes the qth quantile from sorted data (0.0 ≤ q ≤ 1.0).
+    fn quantile(sorted: &[f64], q: f64) -> f64 {
+        let n = sorted.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let pos = q * (n - 1) as f64;
+        let index = pos.floor() as usize;
+        let frac = pos - index as f64;
+        if index + 1 < n {
+            sorted[index] * (1.0 - frac) + sorted[index + 1] * frac
+        } else {
+            sorted[index]
+        }
+    }
+
+    /// Renders an ASCII box plot for the provided sorted data.
+    fn render_box_plot(label: &str, sorted: &[f64]) -> String {
+        let n = sorted.len();
+        let min = sorted[0];
+        let q1 = quantile(sorted, 0.25);
+        let med = quantile(sorted, 0.5);
+        let q3 = quantile(sorted, 0.75);
+        let max = sorted[n - 1];
+
+        let width = 50;
+        let scale = |x: f64| -> usize {
+            if max == min {
+                0
+            } else {
+                ((x - min) / (max - min) * width as f64).round() as usize
+            }
+        };
+
+        let pos_min = 0;
+        let pos_q1 = scale(q1).min(width);
+        let pos_med = scale(med).min(width);
+        let pos_q3 = scale(q3).min(width);
+        let pos_max = width;
+
+        let mut line = vec![' '; width + 1];
+        for ch in line.iter_mut() {
+            *ch = '-';
+        }
+        line[pos_min] = '|';
+        line[pos_max] = '|';
+        if pos_q1 > pos_min {
+            line[pos_q1] = '[';
+        }
+        if pos_med > pos_min && pos_med < pos_max {
+            line[pos_med] = '|';
+        }
+        if pos_q3 < pos_max {
+            line[pos_q3] = ']';
+        }
+
+        let plot_line: String = line.into_iter().collect();
+        let label_line = format!(
+            "{}: min={:.4}, Q1={:.4}, med={:.4}, Q3={:.4}, max={:.4}",
+            label, min, q1, med, q3, max
+        );
+        format!("{}\n{}", label_line, plot_line)
+    }
+
+    /// Runs one benchmark iteration for a given deletion method.
+    /// It creates a fresh directory, makes one test file, then times the deletion.
+    fn run_single_benchmark(test_name: &str, command_type: &str, iteration: usize) -> f64 {
+        let dir_path = prepare_test_directory(test_name, command_type, iteration);
+        // We use a glob pattern that matches our file (names start with "t")
+        let pattern = format!("{}/t*.dat", dir_path.to_string_lossy());
+        println!("Creating 1 file in {}", dir_path.display());
+        create_test_file(&dir_path);
+
+        // Choose the deletion command.
+        let command = if command_type == "rust" {
+            format!("target/release/del \"{}\"", pattern)
+        } else {
+            format!("rm -f {}/t*.dat", dir_path.to_string_lossy())
+        };
+
+        let elapsed = run_command(&command, &pattern);
+        println!(
+            "[{}] Iteration {} (1 file, {} deletion) completed in {:.6} seconds",
+            test_name,
+            iteration + 1,
+            command_type,
+            elapsed
+        );
+        elapsed
+    }
+
+    /// Performs a Mann–Whitney U test on two samples.
+    /// Returns (U statistic, two-tailed p-value).
+    fn mann_whitney_u_test(sample1: &[f64], sample2: &[f64]) -> (f64, f64) {
+        let n1 = sample1.len();
+        let n2 = sample2.len();
+        let mut combined: Vec<(f64, u8)> = Vec::with_capacity(n1 + n2);
+        for &val in sample1 {
+            combined.push((val, 0));
+        }
+        for &val in sample2 {
+            combined.push((val, 1));
+        }
+        combined.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        // Assign ranks (averaging for ties)
+        let mut ranks = vec![0f64; combined.len()];
+        let mut i = 0;
+        while i < combined.len() {
+            let start = i;
+            let mut end = i + 1;
+            while end < combined.len() && (combined[end].0 - combined[start].0).abs() < 1e-12 {
+                end += 1;
+            }
+            let avg_rank = (start + end + 1) as f64 / 2.0;
+            for j in start..end {
+                ranks[j] = avg_rank;
+            }
+            i = end;
+        }
+
+        let mut r1 = 0.0;
+        for (i, &(_, group)) in combined.iter().enumerate() {
+            if group == 0 {
+                r1 += ranks[i];
+            }
+        }
+        let U1 = (n1 * n2) as f64 + (n1 * (n1 + 1)) as f64 / 2.0 - r1;
+        let mean_u = (n1 * n2) as f64 / 2.0;
+        let std_u = ((n1 * n2 * (n1 + n2 + 1)) as f64 / 12.0).sqrt();
+        let z = (U1 - mean_u) / std_u;
+        let p_value = 2.0 * (1.0 - phi(z.abs()));
+        (U1, p_value)
+    }
+
+    /// Approximates the error function.
+    fn erf(x: f64) -> f64 {
+        // Abramowitz and Stegun formula 7.1.26
+        let sign = if x < 0.0 { -1.0 } else { 1.0 };
+        let x = x.abs();
+        let a1 = 0.254829592;
+        let a2 = -0.284496736;
+        let a3 = 1.421413741;
+        let a4 = -1.453152027;
+        let a5 = 1.061405429;
+        let p = 0.3275911;
+        let t = 1.0 / (1.0 + p * x);
+        let y = 1.0 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * (-x * x).exp();
+        sign * y
+    }
+
+    /// Cumulative distribution function for the standard normal distribution.
+    fn phi(x: f64) -> f64 {
+        0.5 * (1.0 + erf(x / 2_f64.sqrt()))
+    }
+
+    /// Runs the full benchmark over ITERATIONS iterations for both deletion methods,
+    /// then prints statistics, box plots, and the result of the statistical test.
+    fn run_benchmark(test_name: &str) {
+        println!(
+            "\n===== {}: 1 file over {} iterations =====",
+            test_name, ITERATIONS
+        );
+        println!("Using base test directory: {}", base_test_dir().display());
+
+        // Run the Rust deletion binary.
+        println!("--- Running Rust binary deletion ---");
+        let mut rust_times = Vec::with_capacity(ITERATIONS);
+        for iter in 0..ITERATIONS {
+            rust_times.push(run_single_benchmark(test_name, "rust", iter));
+        }
+        let (min_r, max_r, mean_r, median_r, stddev_r) = calculate_stats(&rust_times);
+        println!(
+            "[{} - Rust] min: {:.6} s, max: {:.6} s, mean: {:.6} s, median: {:.6} s, stddev: {:.6} s",
+            test_name, min_r, max_r, mean_r, median_r, stddev_r
+        );
+
+        // Run the system "rm" deletion.
+        println!("--- Running system 'rm' deletion ---");
+        let mut system_times = Vec::with_capacity(ITERATIONS);
+        for iter in 0..ITERATIONS {
+            system_times.push(run_single_benchmark(test_name, "system", iter));
+        }
+        let (min_s, max_s, mean_s, median_s, stddev_s) = calculate_stats(&system_times);
+        println!(
+            "[{} - System] min: {:.6} s, max: {:.6} s, mean: {:.6} s, median: {:.6} s, stddev: {:.6} s",
+            test_name, min_s, max_s, mean_s, median_s, stddev_s
+        );
+
+        // Print ASCII box plots.
+        let mut rust_sorted = rust_times.clone();
+        rust_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut system_sorted = system_times.clone();
+        system_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "\nBox Plot for Rust binary deletion:\n{}",
+            render_box_plot("Rust", &rust_sorted)
+        );
+        println!(
+            "\nBox Plot for system 'rm' deletion:\n{}",
+            render_box_plot("rm", &system_sorted)
+        );
+
+        // Perform a Mann–Whitney U test on the two timing samples.
+        let (_u, p_value) = mann_whitney_u_test(&rust_times, &system_times);
+        println!("\nMann–Whitney U test p-value: {:.6}", p_value);
+        if median_r < median_s {
+            println!("Result: Rust binary deletion is faster (based on median times).");
+        } else if median_s < median_r {
+            println!("Result: System 'rm' deletion is faster (based on median times).");
+        } else {
+            println!("Result: Both methods have the same median deletion time.");
+        }
+    }
+
+    #[test]
+    fn benchmark_shell_commands() {
+        println!("=== Starting Shell Command Benchmarks ===");
+        run_benchmark("Deletion_Benchmark");
+        println!("=== Benchmarks Complete ===");
+    }
+}
 
 // cargo test --release -- --nocapture shell_performance
 #[cfg(test)]
