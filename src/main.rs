@@ -732,13 +732,29 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+#[inline(always)]
+pub fn sequential_delete(files: &[std::ffi::CString]) -> std::io::Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    // Each file is assumed to be a valid, null‑terminated CString
+    for file in files {
+        if unsafe { libc::unlink(file.as_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 
 // ====================================================================================================================================
 // ====================================================================================================================================
 // ====================================================================================================================================
 // ====================================================================================================================================
 
-
+// cargo test --release -- --nocapture simple_shell
 #[allow(non_snake_case)]
 #[cfg(test)]
 mod simple_shell {
@@ -757,6 +773,8 @@ mod simple_shell {
     const ITERATIONS: usize = 1000;
     // Number of burn-in iterations (results not recorded).
     const BURN_IN: usize = 50;
+    // Number of files to create per benchmark iteration.
+    const FILE_COUNT: usize = 10;
 
     /// Returns the base test directory (e.g., "$HOME/tmp_test").
     fn base_test_dir() -> PathBuf {
@@ -795,15 +813,17 @@ mod simple_shell {
         dir_path
     }
 
-    /// Creates one test file in the specified directory.
+    /// Creates test files in the specified directory.
     fn create_test_file(dir: &Path) {
-        let file_path = dir.join("test_file_0.dat");
-        let mut file = File::create(&file_path)
-            .unwrap_or_else(|e| panic!("Failed to create {}: {}", file_path.display(), e));
-        // Write 16 zero bytes.
-        let content = vec![0u8; 16];
-        file.write_all(&content)
-            .unwrap_or_else(|e| panic!("Failed to write to {}: {}", file_path.display(), e));
+        for i in 0..FILE_COUNT {
+            let file_path = dir.join(format!("test_file_{}.dat", i));
+            let mut file = File::create(&file_path)
+                .unwrap_or_else(|e| panic!("Failed to create {}: {}", file_path.display(), e));
+            // Write 16 zero bytes.
+            let content = vec![0u8; 16];
+            file.write_all(&content)
+                .unwrap_or_else(|e| panic!("Failed to write to {}: {}", file_path.display(), e));
+        }
     }
 
     /// Verifies that no files matching the provided glob pattern remain.
@@ -950,10 +970,8 @@ mod simple_shell {
             min, q1, mean, median, q3, max
         );
 
-        // Create a label line to show the minimum and maximum values below the plot.
         let min_label = format!("{:.4}", min);
         let max_label = format!("{:.4}", max);
-        // Calculate spacing between the two labels.
         let space_count = if width > (min_label.len() + max_label.len()) {
             width - (min_label.len() + max_label.len())
         } else {
@@ -965,26 +983,25 @@ mod simple_shell {
     }
 
     /// Runs one benchmark iteration for a given deletion method.
-    /// It creates a fresh directory, makes one test file, then times the deletion.
+    /// It creates a fresh directory, makes test files, then times the deletion.
     fn run_single_benchmark(test_name: &str, command_type: &str, iteration: usize) -> f64 {
         let dir_path = prepare_test_directory(test_name, command_type, iteration);
-        // We use a glob pattern that matches our file (names starting with "t").
-        let pattern = format!("{}/t*.dat", dir_path.to_string_lossy());
-        println!("Creating 1 file in {}", dir_path.display());
+        let pattern = format!("{}/test_file*.dat", dir_path.to_string_lossy());
+        println!("Creating {} files in {}", FILE_COUNT, dir_path.display());
         create_test_file(&dir_path);
 
-        // Choose the deletion command.
         let command = if command_type == "rust" {
             format!("target/release/del \"{}\"", pattern)
         } else {
-            format!("rm -f {}/t*.dat", dir_path.to_string_lossy())
+            format!("rm -f {}/test_file*.dat", dir_path.to_string_lossy())
         };
 
         let elapsed = run_command(&command, &pattern);
         println!(
-            "[{}] Iteration {} (1 file, {} deletion) completed in {:.6} seconds",
+            "[{}] Iteration {} ({} files, {} deletion) completed in {:.6} seconds",
             test_name,
             iteration + 1,
+            FILE_COUNT,
             command_type,
             elapsed
         );
@@ -1005,7 +1022,6 @@ mod simple_shell {
         }
         combined.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
-        // Assign ranks (averaging for ties).
         let mut ranks = vec![0f64; combined.len()];
         let mut i = 0;
         while i < combined.len() {
@@ -1037,7 +1053,6 @@ mod simple_shell {
 
     /// Approximates the error function.
     fn erf(x: f64) -> f64 {
-        // Abramowitz and Stegun formula 7.1.26.
         let sign = if x < 0.0 { -1.0 } else { 1.0 };
         let x = x.abs();
         let a1 = 0.254829592;
@@ -1058,19 +1073,17 @@ mod simple_shell {
 
     /// Runs the full benchmark. First a burn‑in period is executed (without recording results).
     /// Then, for each of the actual iterations the deletion method is chosen randomly.
-    /// Every 50 iterations (if enough samples exist) we check the Mann–Whitney U test p-value
-    /// and stop early if it falls below 0.01.
+    /// Every 50 iterations (if enough samples exist) the Mann–Whitney U test p-value is checked
+    /// and stops early if it falls below 0.01.
     fn run_benchmark(test_name: &str) {
         println!(
-            "\n===== {}: 1 file over {} iterations (with {} burn-in iterations) =====",
-            test_name, ITERATIONS, BURN_IN
+            "\n===== {}: {} files over {} iterations (with {} burn-in iterations) =====",
+            test_name, FILE_COUNT, ITERATIONS, BURN_IN
         );
         println!("Using base test directory: {}", base_test_dir().display());
 
-        // Use the updated random number generator (replacing deprecated thread_rng).
         let mut rng = rand::rng();
 
-        // --- Burn-in period (results are discarded) ---
         println!("\nStarting burn-in period ({} iterations)...", BURN_IN);
         for i in 0..BURN_IN {
             let method = if rng.random_bool(0.5) { "rust" } else { "system" };
@@ -1078,7 +1091,6 @@ mod simple_shell {
         }
         println!("Burn-in complete.\n");
 
-        // --- Actual benchmarking ---
         let mut rust_times: Vec<f64> = Vec::new();
         let mut system_times: Vec<f64> = Vec::new();
 
@@ -1090,7 +1102,6 @@ mod simple_shell {
             } else {
                 system_times.push(elapsed);
             }
-            // Every 50 iterations (if enough samples are available) check for early stopping.
             if (i + 1) % 50 == 0 && rust_times.len() >= 10 && system_times.len() >= 10 {
                 let (_u, p_value) = mann_whitney_u_test(&rust_times, &system_times);
                 println!(
@@ -1105,7 +1116,6 @@ mod simple_shell {
             }
         }
 
-        // --- Print overall statistics ---
         if !rust_times.is_empty() {
             let (min_r, max_r, mean_r, median_r, stddev_r) = calculate_stats(&rust_times);
             println!(
@@ -1121,7 +1131,6 @@ mod simple_shell {
             );
         }
 
-        // --- Display improved box plots ---
         if !rust_times.is_empty() {
             let mut rust_sorted = rust_times.clone();
             rust_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -1135,7 +1144,6 @@ mod simple_shell {
             println!("{}", render_box_plot_custom(&system_sorted));
         }
 
-        // --- Final Mann–Whitney U test ---
         if !rust_times.is_empty() && !system_times.is_empty() {
             let (_u, p_value) = mann_whitney_u_test(&rust_times, &system_times);
             println!("\nFinal Mann–Whitney U test p-value: {:.6}", p_value);
