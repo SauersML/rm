@@ -227,6 +227,7 @@ fn main() {
             let result = run_deletion_rayon(
                 None,
                 None,
+                progress_reporter,
                 fd,
                 matched_files,
                 matched_files_number,
