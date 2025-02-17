@@ -740,10 +740,12 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
 // ====================================================================================================================================
 // ====================================================================================================================================
 
+
 #[allow(non_snake_case)]
 #[cfg(test)]
 mod simple_shell {
     use glob::glob;
+    use rand::Rng;
     use std::{
         fs::{self, File},
         io::Write,
@@ -753,8 +755,10 @@ mod simple_shell {
         time::{Duration, Instant},
     };
 
-    // Run 1,000 iterations per deletion method.
+    // Total iterations for actual benchmarking (after burn-in).
     const ITERATIONS: usize = 1000;
+    // Number of burn-in iterations (results not recorded).
+    const BURN_IN: usize = 50;
 
     /// Returns the base test directory (e.g., "$HOME/tmp_test").
     fn base_test_dir() -> PathBuf {
@@ -772,7 +776,7 @@ mod simple_shell {
         String::from_utf8_lossy(&output.stdout).to_string()
     }
 
-    /// Prepares a fresh test directory for a single benchmark iteration.
+    /// Prepares a fresh test directory for one benchmark iteration.
     /// The directory is created at: BASE_TEST_DIR/<test_name>_<command_type>_iter<iteration>
     fn prepare_test_directory(test_name: &str, command_type: &str, iteration: usize) -> PathBuf {
         let dir_path = base_test_dir().join(format!(
@@ -798,7 +802,7 @@ mod simple_shell {
         let file_path = dir.join("test_file_0.dat");
         let mut file = File::create(&file_path)
             .unwrap_or_else(|e| panic!("Failed to create {}: {}", file_path.display(), e));
-        // Write 16 zero bytes
+        // Write 16 zero bytes.
         let content = vec![0u8; 16];
         file.write_all(&content)
             .unwrap_or_else(|e| panic!("Failed to write to {}: {}", file_path.display(), e));
@@ -837,8 +841,7 @@ mod simple_shell {
     /// All pre-/post-command work (syncing, sleeping, file verification) is done outside the timed region.
     fn run_command(command: &str, pattern: &str) -> f64 {
         println!("Executing: {}", command);
-
-        // Pre-command sync (not timed)
+        // Pre-command sync (not timed).
         Command::new("sync")
             .status()
             .expect("Failed to sync before command");
@@ -859,7 +862,7 @@ mod simple_shell {
             );
         }
 
-        // Post-command work (sync, sleep, and verify deletion)
+        // Post-command: sync, wait a bit, then verify deletion.
         Command::new("sync")
             .status()
             .expect("Failed to sync after command");
@@ -869,7 +872,7 @@ mod simple_shell {
         elapsed.as_secs_f64()
     }
 
-    /// Calculates basic statistics: (min, max, mean, median, stddev).
+    /// Calculates basic statistics: (minimum, maximum, mean, median, standard deviation).
     fn calculate_stats(times: &[f64]) -> (f64, f64, f64, f64, f64) {
         let min = times.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -906,59 +909,68 @@ mod simple_shell {
         }
     }
 
-    /// Renders an ASCII box plot for the provided sorted data.
-    fn render_box_plot(label: &str, sorted: &[f64]) -> String {
+    /// Renders an improved ASCII box plot for the provided sorted data.
+    /// The plot includes a descriptive statistics line and an axis showing minimum and maximum.
+    fn render_box_plot_custom(sorted: &[f64]) -> String {
         let n = sorted.len();
         let min = sorted[0];
         let q1 = quantile(sorted, 0.25);
-        let med = quantile(sorted, 0.5);
+        let median = quantile(sorted, 0.5);
         let q3 = quantile(sorted, 0.75);
         let max = sorted[n - 1];
+        let sum: f64 = sorted.iter().sum();
+        let mean = sum / (sorted.len() as f64);
 
-        let width = 50;
+        let width = 60;
         let scale = |x: f64| -> usize {
             if max == min {
                 0
             } else {
-                ((x - min) / (max - min) * width as f64).round() as usize
+                (((x - min) / (max - min)) * (width as f64)) as usize
             }
         };
-
         let pos_min = 0;
         let pos_q1 = scale(q1).min(width);
-        let pos_med = scale(med).min(width);
+        let pos_median = scale(median).min(width);
         let pos_q3 = scale(q3).min(width);
         let pos_max = width;
 
         let mut line = vec![' '; width + 1];
-        for ch in line.iter_mut() {
-            *ch = '-';
+        for i in 0..=width {
+            line[i] = '-';
         }
         line[pos_min] = '|';
         line[pos_max] = '|';
-        if pos_q1 > pos_min {
-            line[pos_q1] = '[';
-        }
-        if pos_med > pos_min && pos_med < pos_max {
-            line[pos_med] = '|';
-        }
-        if pos_q3 < pos_max {
-            line[pos_q3] = ']';
-        }
+        line[pos_q1] = '[';
+        line[pos_q3] = ']';
+        line[pos_median] = 'M';
 
         let plot_line: String = line.into_iter().collect();
-        let label_line = format!(
-            "{}: min={:.4}, Q1={:.4}, med={:.4}, Q3={:.4}, max={:.4}",
-            label, min, q1, med, q3, max
+
+        let stats_line = format!(
+            "Minimum: {:.4}    Q1: {:.4}    Mean: {:.4}    Median: {:.4}    Q3: {:.4}    Maximum: {:.4}",
+            min, q1, mean, median, q3, max
         );
-        format!("{}\n{}", label_line, plot_line)
+
+        // Create a label line to show the minimum and maximum values below the plot.
+        let min_label = format!("{:.4}", min);
+        let max_label = format!("{:.4}", max);
+        // Calculate spacing between the two labels.
+        let space_count = if width > (min_label.len() + max_label.len()) {
+            width - (min_label.len() + max_label.len())
+        } else {
+            1
+        };
+        let label_line = format!("{}{}{}", min_label, " ".repeat(space_count), max_label);
+
+        format!("{}\n{}\n{}", stats_line, plot_line, label_line)
     }
 
     /// Runs one benchmark iteration for a given deletion method.
     /// It creates a fresh directory, makes one test file, then times the deletion.
     fn run_single_benchmark(test_name: &str, command_type: &str, iteration: usize) -> f64 {
         let dir_path = prepare_test_directory(test_name, command_type, iteration);
-        // We use a glob pattern that matches our file (names start with "t")
+        // We use a glob pattern that matches our file (names starting with "t").
         let pattern = format!("{}/t*.dat", dir_path.to_string_lossy());
         println!("Creating 1 file in {}", dir_path.display());
         create_test_file(&dir_path);
@@ -995,7 +1007,7 @@ mod simple_shell {
         }
         combined.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
-        // Assign ranks (averaging for ties)
+        // Assign ranks (averaging for ties).
         let mut ranks = vec![0f64; combined.len()];
         let mut i = 0;
         while i < combined.len() {
@@ -1027,7 +1039,7 @@ mod simple_shell {
 
     /// Approximates the error function.
     fn erf(x: f64) -> f64 {
-        // Abramowitz and Stegun formula 7.1.26
+        // Abramowitz and Stegun formula 7.1.26.
         let sign = if x < 0.0 { -1.0 } else { 1.0 };
         let x = x.abs();
         let a1 = 0.254829592;
@@ -1046,72 +1058,113 @@ mod simple_shell {
         0.5 * (1.0 + erf(x / 2_f64.sqrt()))
     }
 
-    /// Runs the full benchmark over ITERATIONS iterations for both deletion methods,
-    /// then prints statistics, box plots, and the result of the statistical test.
+    /// Runs the full benchmark. First a burn‑in period is executed (without recording results).
+    /// Then, for each of the actual iterations the deletion method is chosen randomly.
+    /// Every 50 iterations (if enough samples exist) we check the Mann–Whitney U test p-value
+    /// and stop early if it falls below 0.01.
     fn run_benchmark(test_name: &str) {
         println!(
-            "\n===== {}: 1 file over {} iterations =====",
-            test_name, ITERATIONS
+            "\n===== {}: 1 file over {} iterations (with {} burn-in iterations) =====",
+            test_name, ITERATIONS, BURN_IN
         );
         println!("Using base test directory: {}", base_test_dir().display());
 
-        // Run the Rust deletion binary.
-        println!("--- Running Rust binary deletion ---");
-        let mut rust_times = Vec::with_capacity(ITERATIONS);
-        for iter in 0..ITERATIONS {
-            rust_times.push(run_single_benchmark(test_name, "rust", iter));
+        // Use the updated random number generator (replacing deprecated thread_rng).
+        let mut rng = rand::rng();
+
+        // --- Burn-in period (results are discarded) ---
+        println!("\nStarting burn-in period ({} iterations)...", BURN_IN);
+        for i in 0..BURN_IN {
+            let method = if rng.random_bool(0.5) { "rust" } else { "system" };
+            let _ = run_single_benchmark(test_name, method, i);
         }
-        let (min_r, max_r, mean_r, median_r, stddev_r) = calculate_stats(&rust_times);
-        println!(
-            "[{} - Rust] min: {:.6} s, max: {:.6} s, mean: {:.6} s, median: {:.6} s, stddev: {:.6} s",
-            test_name, min_r, max_r, mean_r, median_r, stddev_r
-        );
+        println!("Burn-in complete.\n");
 
-        // Run the system "rm" deletion.
-        println!("--- Running system 'rm' deletion ---");
-        let mut system_times = Vec::with_capacity(ITERATIONS);
-        for iter in 0..ITERATIONS {
-            system_times.push(run_single_benchmark(test_name, "system", iter));
+        // --- Actual benchmarking ---
+        let mut rust_times: Vec<f64> = Vec::new();
+        let mut system_times: Vec<f64> = Vec::new();
+
+        for i in 0..ITERATIONS {
+            let method = if rng.random_bool(0.5) { "rust" } else { "system" };
+            let elapsed = run_single_benchmark(test_name, method, BURN_IN + i);
+            if method == "rust" {
+                rust_times.push(elapsed);
+            } else {
+                system_times.push(elapsed);
+            }
+            // Every 50 iterations (if enough samples are available) check for early stopping.
+            if (i + 1) % 50 == 0 && rust_times.len() >= 10 && system_times.len() >= 10 {
+                let (_u, p_value) = mann_whitney_u_test(&rust_times, &system_times);
+                println!(
+                    "Intermediate Mann–Whitney U test p-value after {} iterations: {:.6}",
+                    i + 1,
+                    p_value
+                );
+                if p_value < 0.01 {
+                    println!("Early stopping criteria met (p < 0.01). Stopping benchmark early.");
+                    break;
+                }
+            }
         }
-        let (min_s, max_s, mean_s, median_s, stddev_s) = calculate_stats(&system_times);
-        println!(
-            "[{} - System] min: {:.6} s, max: {:.6} s, mean: {:.6} s, median: {:.6} s, stddev: {:.6} s",
-            test_name, min_s, max_s, mean_s, median_s, stddev_s
-        );
 
-        // Print ASCII box plots.
-        let mut rust_sorted = rust_times.clone();
-        rust_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let mut system_sorted = system_times.clone();
-        system_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        println!(
-            "\nBox Plot for Rust binary deletion:\n{}",
-            render_box_plot("Rust", &rust_sorted)
-        );
-        println!(
-            "\nBox Plot for system 'rm' deletion:\n{}",
-            render_box_plot("rm", &system_sorted)
-        );
+        // --- Print overall statistics ---
+        if !rust_times.is_empty() {
+            let (min_r, max_r, mean_r, median_r, stddev_r) = calculate_stats(&rust_times);
+            println!(
+                "\nFor Rust binary deletion:\nMinimum Deletion Time: {:.6} seconds\nMaximum Deletion Time: {:.6} seconds\nMean Deletion Time: {:.6} seconds\nMedian Deletion Time: {:.6} seconds\nStandard Deviation: {:.6} seconds",
+                min_r, max_r, mean_r, median_r, stddev_r
+            );
+        }
+        if !system_times.is_empty() {
+            let (min_s, max_s, mean_s, median_s, stddev_s) = calculate_stats(&system_times);
+            println!(
+                "\nFor system 'rm' deletion:\nMinimum Deletion Time: {:.6} seconds\nMaximum Deletion Time: {:.6} seconds\nMean Deletion Time: {:.6} seconds\nMedian Deletion Time: {:.6} seconds\nStandard Deviation: {:.6} seconds",
+                min_s, max_s, mean_s, median_s, stddev_s
+            );
+        }
 
-        // Perform a Mann–Whitney U test on the two timing samples.
-        let (_u, p_value) = mann_whitney_u_test(&rust_times, &system_times);
-        println!("\nMann–Whitney U test p-value: {:.6}", p_value);
-        if median_r < median_s {
-            println!("Result: Rust binary deletion is faster (based on median times).");
-        } else if median_s < median_r {
-            println!("Result: System 'rm' deletion is faster (based on median times).");
-        } else {
-            println!("Result: Both methods have the same median deletion time.");
+        // --- Display improved box plots ---
+        if !rust_times.is_empty() {
+            let mut rust_sorted = rust_times.clone();
+            rust_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!("\nRust binary deletion:");
+            println!("{}", render_box_plot_custom(&rust_sorted));
+        }
+        if !system_times.is_empty() {
+            let mut system_sorted = system_times.clone();
+            system_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!("\nSystem 'rm' deletion:");
+            println!("{}", render_box_plot_custom(&system_sorted));
+        }
+
+        // --- Final Mann–Whitney U test ---
+        if !rust_times.is_empty() && !system_times.is_empty() {
+            let (_u, p_value) = mann_whitney_u_test(&rust_times, &system_times);
+            println!("\nFinal Mann–Whitney U test p-value: {:.6}", p_value);
+            let (_, _, _, median_r, _) = calculate_stats(&rust_times);
+            let (_, _, _, median_s, _) = calculate_stats(&system_times);
+            if median_r < median_s {
+                println!("Result: Rust binary deletion is faster (based on median deletion time).");
+            } else if median_s < median_r {
+                println!("Result: System 'rm' deletion is faster (based on median deletion time).");
+            } else {
+                println!("Result: Both methods have the same median deletion time.");
+            }
         }
     }
 
     #[test]
-    fn benchmark_shell_commands() {
+    fn simple_shell() {
         println!("=== Starting Shell Command Benchmarks ===");
         run_benchmark("Deletion_Benchmark");
         println!("=== Benchmarks Complete ===");
     }
 }
+
+
+
+
+
 
 // cargo test --release -- --nocapture shell_performance
 #[cfg(test)]
