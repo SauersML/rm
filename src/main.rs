@@ -298,20 +298,17 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn run_deletion_rayon(
+fn run_deletion_rayon<P: ProgressReporter + Clone>(
     thread_pool_size: Option<usize>,
     batch_size_override: Option<usize>,
+    progress_reporter: P,
     fd: RawFd,
     matched_files: Vec<CString>,
     matched_files_number: usize,
 ) -> io::Result<()> {
-    // Compute optimal thread pool and batch size
+    // Compute optimal thread pool and batch size.
     let (optimal_thread_pool, optimal_batch) = compute_optimal_rayon(matched_files_number);
-
-    // If no thread pool size was provided, use the computed optimal thread pool size (rounded to the nearest usize).
     let concurrency = thread_pool_size.unwrap_or_else(|| optimal_thread_pool.round() as usize);
-
-    // If no batch size override was provided, use the computed optimal batch size (rounded to the nearest usize).
     let batch_size = batch_size_override.unwrap_or_else(|| optimal_batch.round() as usize);
 
     println!(
@@ -322,34 +319,6 @@ fn run_deletion_rayon(
         num_cpus::get()
     );
 
-    // Setup a progress bar
-    let config = Config {
-        throttle_millis: 250,
-        ..Default::default()
-    };
-    let pb = Arc::new(Bar::new(matched_files.len() as u64, config));
-
-    // We'll send completed counts in batches to the progress bar thread.
-    let (sender, receiver) = channel::unbounded::<usize>();
-
-    // Spawn a thread to consume batch-completion counts and increment the bar.
-    let pb_thread = std::thread::spawn({
-        let pb = Arc::clone(&pb);
-        move || {
-            let mut total_done = 0;
-            while let Ok(batch_count) = receiver.recv() {
-                total_done += batch_count;
-                pb.inc(batch_count as u64);
-            }
-            // If for some reason we didn't get the last partial batch, account for it here:
-            let remainder = matched_files_number - total_done;
-            if remainder > 0 {
-                pb.inc(remainder as u64);
-            }
-            // We'll finish the bar later (outside this thread).
-        }
-    });
-
     // Build a custom Rayon thread pool with the desired concurrency.
     let pool = ThreadPoolBuilder::new()
         .num_threads(concurrency)
@@ -357,23 +326,17 @@ fn run_deletion_rayon(
         .map_err(|e| {
             io::Error::new(
                 io::ErrorKind::Other,
-                format!("Failed to build Rayon thread pool: {}", e),
+                format!("Failed to build Rayon thread pool: {}", e)
             )
         })?;
 
     // Run the parallel deletion inside that custom pool.
     pool.install(|| {
         matched_files.par_chunks(batch_size).for_each(|chunk| {
-            let mut count = 0;
             for filename_cstr in chunk {
-                let result = unsafe {
-                    #[cfg(target_os = "macos")]
-                    { libc::unlink(filename_cstr.as_ptr()) }
-                    #[cfg(not(target_os = "macos"))]
-                    { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) }
-                };
+                let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
                 if result == 0 {
-                    count += 1;
+                    progress_reporter.inc(1);
                 } else {
                     let e = io::Error::last_os_error();
                     eprintln!(
@@ -384,28 +347,20 @@ fn run_deletion_rayon(
                     std::process::exit(1);
                 }
             }
-            // Send how many were successfully deleted in this chunk.
-            sender.send(count).unwrap();
         });
     });
 
-    // Close the sending side, so the progress thread can end
-    drop(sender);
-    pb_thread.join().unwrap();
+    // Finish progress reporting using the passed-in reporter.
+    progress_reporter.finish();
 
-    // Now we can finish the bar because the thread is done
-    match Arc::try_unwrap(pb) {
-        Ok(bar) => bar.finish(),
-        Err(_) => eprintln!("[WARN] Could not get exclusive ownership of progress bar."),
-    }
-
-    // Close the directory FD
+    // Close the directory file descriptor.
     unsafe {
         libc::close(fd);
     }
 
     Ok(())
 }
+
 
 #[inline(always)]
 pub fn compute_optimal_tokio(num_files: usize, simulated_cpus: usize) -> f64 {
