@@ -529,6 +529,26 @@ fn collect_matching_files(
         Ok((fd, files))
     }
 }
+
+#[cfg(target_os = "linux")]
+#[inline(always)]
+pub fn sequential_delete(files: &[std::ffi::CString], dir_fd: libc::c_int) -> std::io::Result<()> {
+    // If no files to delete, exit immediately
+    if files.is_empty() {
+        return Ok(());
+    }
+    // For each file, call unlinkat with the provided directory file descriptor
+    // Using unlinkat here avoids re‑resolving the directory path for each deletion
+    for file in files {
+        // Each file is assumed to be a valid, null‑terminated CString,
+        // and dir_fd must be a valid directory file descriptor (or AT_FDCWD)
+        if unsafe { libc::unlinkat(dir_fd, file.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 // MACOS FUNCTIONS ============================================================================================
 // ============================================================================================================
 
