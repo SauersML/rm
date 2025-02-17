@@ -16,7 +16,6 @@ use std::os::unix::io::RawFd;
 use globset::{Glob, GlobSetBuilder};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
-use crossbeam::channel;
 use std::ffi::OsStr;
 use globset::GlobSet;
 
