@@ -298,7 +298,7 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn run_deletion_rayon<P: ProgressReporter + Clone>(
+fn run_deletion_rayon<P: ProgressReporter + Clone + Sync>(
     thread_pool_size: Option<usize>,
     batch_size_override: Option<usize>,
     progress_reporter: P,
