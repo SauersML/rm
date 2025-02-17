@@ -737,11 +737,11 @@ mod simple_shell {
     };
 
     // Total iterations for actual benchmarking (after burn-in).
-    const ITERATIONS: usize = 1000;
+    const ITERATIONS: usize = 10000;
     // Number of burn-in iterations (results not recorded).
     const BURN_IN: usize = 50;
     // Number of files to create per benchmark iteration.
-    const FILE_COUNT: usize = 1;
+    const FILE_COUNT: usize = 10;
 
     /// Returns the base test directory (e.g., "$HOME/tmp_test").
     fn base_test_dir() -> PathBuf {
@@ -1135,10 +1135,6 @@ mod simple_shell {
 }
 
 
-
-
-
-
 // cargo test --release -- --nocapture shell_performance
 #[cfg(test)]
 mod shell_performance {
@@ -1154,6 +1150,18 @@ mod shell_performance {
 
     // Number of iterations per command
     const ITERATIONS: usize = 5;
+
+    /// Struct to hold summary benchmark results.
+    struct SummaryResult {
+        test_name: String,
+        file_count: usize,
+        command_type: String,
+        min: f64,
+        max: f64,
+        mean: f64,
+        median: f64,
+        stddev: f64,
+    }
 
     /// Returns the base test directory (e.g., "$HOME/tmp_test").
     fn base_test_dir() -> PathBuf {
@@ -1344,7 +1352,8 @@ mod shell_performance {
     ///
     /// This function executes both the Rust binary deletion and the system deletion commands
     /// over multiple iterations and then prints comprehensive statistics.
-    fn run_benchmark_for_file_count(test_name: &str, file_count: usize) {
+    /// Returns a tuple of SummaryResult: (rust_result, system_result).
+    fn run_benchmark_for_file_count(test_name: &str, file_count: usize) -> (SummaryResult, SummaryResult) {
         println!("\n===== {}: {} file(s) =====", test_name, file_count);
         println!("Using base test directory: {}", base_test_dir().display());
 
@@ -1359,6 +1368,16 @@ mod shell_performance {
             "[{} - Rust] min: {:.3} s, max: {:.3} s, mean: {:.3} s, median: {:.3} s, stddev: {:.3} s",
             test_name, min_r, max_r, mean_r, median_r, stddev_r
         );
+        let rust_result = SummaryResult {
+            test_name: test_name.to_string(),
+            file_count,
+            command_type: "rust".to_string(),
+            min: min_r,
+            max: max_r,
+            mean: mean_r,
+            median: median_r,
+            stddev: stddev_r,
+        };
 
         // Benchmark the system deletion command.
         println!("--- Running system Deletion_Benchmark ---");
@@ -1371,18 +1390,56 @@ mod shell_performance {
             "[{} - System] min: {:.3} s, max: {:.3} s, mean: {:.3} s, median: {:.3} s, stddev: {:.3} s",
             test_name, min_s, max_s, mean_s, median_s, stddev_s
         );
+        let system_result = SummaryResult {
+            test_name: test_name.to_string(),
+            file_count,
+            command_type: "system".to_string(),
+            min: min_s,
+            max: max_s,
+            mean: mean_s,
+            median: median_s,
+            stddev: stddev_s,
+        };
+
+        (rust_result, system_result)
     }
 
     /// Executes the full benchmark suite by running both deletion methods
-    /// across multiple file count scenarios.
+    /// across multiple file count scenarios, then summarizes the results in a table.
     #[test]
     fn benchmark_shell_commands() {
         println!("=== Starting Shell Command Benchmarks ===");
-        let file_counts = [1, 100, 10_000];
+        let file_counts = [1, 100, 1000];
+        let mut summary_results = Vec::new();
+
         for &count in &file_counts {
-            run_benchmark_for_file_count("Deletion_Benchmark", count);
+            let (rust_result, system_result) = run_benchmark_for_file_count("Deletion_Benchmark", count);
+            summary_results.push(rust_result);
+            summary_results.push(system_result);
         }
         println!("=== Benchmarks Complete ===");
+
+        // Print summary table at the very end.
+        println!("\n===== Summary of Benchmark Results =====");
+        println!(
+            "{:<20} {:<12} {:<12} {:<8} {:<8} {:<8} {:<8} {:<8}",
+            "Test Name", "File Count", "Cmd Type", "Min(s)", "Max(s)", "Mean(s)", "Median(s)", "StdDev(s)"
+        );
+        println!("{}", "-".repeat(90));
+        for result in summary_results {
+            println!(
+                "{:<20} {:<12} {:<12} {:<8.3} {:<8.3} {:<8.3} {:<8.3} {:<8.3}",
+                result.test_name,
+                result.file_count,
+                result.command_type,
+                result.min,
+                result.max,
+                result.mean,
+                result.median,
+                result.stddev
+            );
+        }
+        println!("{}", "-".repeat(90));
     }
 }
 
