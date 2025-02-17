@@ -3181,11 +3181,12 @@ mod rayon_tune {
                     // Note that run_deletion_rayon takes 5 arguments:
                     // thread_pool_size, batch_size_override, fd, matched_files, matched_files_number.
                     let res = run_deletion_rayon(
-                        Some(concurrency),
-                        Some(bsize),
+                        None,
+                        None,
+                        progress_reporter,
                         fd,
                         matched_files,
-                        num_matches,
+                        matched_files_number,
                     );
 
                     let elapsed = start.elapsed();
