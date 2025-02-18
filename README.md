@@ -1,4 +1,4 @@
-# del: Faster File Deletion
+# `del`: Faster File Deletion
 
 This is a Rust-based command-line utility that deletes files matching a given pattern in the filesystem, which aims to be faster than the "rm" command. It uses glob patterns (wildcards) for matching filenames and performs the deletions in parallel.
 
@@ -10,17 +10,17 @@ This is a Rust-based command-line utility that deletes files matching a given pa
 - Uses parallel operations for efficient parallel file deletions.
 - Logs success and error messages to the standard output.
 
-## What del does not do
+## What `del` does not do
 - Shell expansion of wildcards resulting in "too many arguments" errors.
 - Pattern-matching on directories: you must specify the single directory you wish to delete files in.
 - Recursion.
 - Directory deletion.
-- Warnings: del trusts that your input is what you intended.
+- Warnings: `del` trusts that your input is what you intended.
 - Run on Windows.
 
 ## Speed
-- del aims to be faster than or equivalent to rm on Linux universally, and usually faster on MacOS.
-- del uses parallel execution with a thread pool size and batch size calculated from the number of files with a formula derived from empirical optimization.
+- `del` aims to be faster than or equivalent to rm on Linux universally, and usually faster on MacOS.
+- `del` uses parallel execution with a thread pool size and batch size calculated from the number of files with a formula derived from empirical optimization.
 
 ## Installation
 
