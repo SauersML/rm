@@ -2066,7 +2066,7 @@ mod performance_tests {
     /// Test to verify that running deletion with a pattern that matches no files does not error.
     #[test]
     fn test_delete_with_no_matches() {
-        println!("\n--- Test: Deletion with No Matches ---");
+        println!("\n--- Deletion with No Matches ---");
         let temp_dir = tempdir().unwrap();
         let base = temp_dir.path().to_string_lossy().to_string();
         let pattern = format!("{}/no_such_file_*.dat", base);
@@ -2081,7 +2081,7 @@ mod performance_tests {
     /// Test to make sure that directories are not removed during deletion.
     #[test]
     fn test_skips_directories() {
-        println!("\n--- Test: Skipping Directories ---");
+        println!("\n--- Skipping Directories ---");
         let temp_dir = tempdir().unwrap();
         let dir_path = temp_dir.path().join("my_test_dir");
         fs::create_dir(&dir_path).unwrap();
@@ -2108,7 +2108,7 @@ mod performance_tests {
     /// only the matching files are removed while non‑matching files remain.
     #[test]
     fn test_partial_match_deletion() {
-        println!("\n--- Test: Partial Pattern Deletion ---");
+        println!("\n--- Partial Pattern Deletion ---");
         let temp_dir = tempdir().unwrap();
         let base = temp_dir.path();
 
@@ -3272,6 +3272,379 @@ mod rayon_tune {
                     // tmp_dir is dropped here and its contents are cleaned up.
                 }
             }
+        }
+    }
+}
+
+
+
+#[cfg(test)]
+mod shell_binary_correctness_tests {
+    use std::fs;
+    use std::io::Write;
+    use std::path::Path;
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    const DEL_BINARY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/release/del");
+
+    /// Creates a file at the given path with the specified content.
+    fn create_file<P: AsRef<Path>>(path: P, content: &str) {
+        let mut file = fs::File::create(path).expect("Failed to create file");
+        write!(file, "{}", content).expect("Failed to write file");
+    }
+
+    /// Returns true if the given path exists.
+    fn file_exists<P: AsRef<Path>>(path: P) -> bool {
+        path.as_ref().exists()
+    }
+
+    /// Runs the deletion binary via the shell.
+    ///
+    /// It builds a command line that hard‑codes DEL_BINARY and appends the given `args`
+    /// (glob patterns and flags). The working directory is set to `work_dir`.
+    /// Returns a tuple: (stdout, stderr, exit code).
+    fn run_del(args: &str, work_dir: &Path) -> (String, String, i32) {
+        let command_line = format!("{} {}", DEL_BINARY, args);
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&command_line)
+            .current_dir(work_dir)
+            .output()
+            .expect("Failed to execute command");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.status.code().unwrap_or(-1);
+        (stdout, stderr, exit_code)
+    }
+
+    // --- Basic file deletion ---
+    #[test]
+    fn basic_deletion() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("file.txt");
+        create_file(&file, "content");
+        let (_stdout, _stderr, exit_code) = run_del("\"file.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Basic deletion failed");
+        assert!(!file_exists(&file), "File was not deleted");
+    }
+
+    // --- Deleting multiple files by pattern ---
+    #[test]
+    fn multiple_file_deletion() {
+        let temp = tempdir().unwrap();
+        let file1 = temp.path().join("a.txt");
+        let file2 = temp.path().join("b.txt");
+        let file3 = temp.path().join("c.log");
+        create_file(&file1, "a");
+        create_file(&file2, "b");
+        create_file(&file3, "c");
+        let (_stdout, _stderr, exit_code) = run_del("\"*.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Multiple file deletion failed");
+        assert!(!file_exists(&file1), "a.txt was not deleted");
+        assert!(!file_exists(&file2), "b.txt was not deleted");
+        assert!(file_exists(&file3), "Non‑matching file c.log was deleted");
+    }
+
+    // --- Pattern matches no files (graceful handling) ---
+    #[test]
+    fn deletion_with_no_match() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("data.dat");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"*.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Deletion with no matching pattern did not succeed gracefully");
+        assert!(file_exists(&file), "File should not be deleted when no match");
+    }
+
+    // --- Deletion of a file with spaces in its name ---
+    #[test]
+    fn deletion_with_spaces() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("file with spaces.txt");
+        create_file(&file, "content");
+        let (_stdout, _stderr, exit_code) = run_del("\"file with spaces.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Deletion of file with spaces failed");
+        assert!(!file_exists(&file), "File with spaces was not deleted");
+    }
+
+    // --- Deletion of a file with special characters ---
+    #[test]
+    fn deletion_with_special_chars() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("special_!@#$.txt");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"special_!@#$.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Deletion with special characters failed");
+        assert!(!file_exists(&file), "File with special characters was not deleted");
+    }
+
+    // --- Deletion of a readonly file ---
+    #[test]
+    fn readonly_file_deletion() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("readonly.txt");
+        create_file(&file, "data");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&file).unwrap().permissions();
+            perms.set_mode(0o444);
+            fs::set_permissions(&file, perms).expect("Failed to set readonly permissions");
+        }
+        let (_stdout, _stderr, exit_code) = run_del("\"readonly.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Deletion of readonly file failed");
+        assert!(!file_exists(&file), "Readonly file was not deleted");
+    }
+
+    // --- Deletion using an absolute file path ---
+    #[test]
+    fn absolute_path_deletion() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("abs.txt");
+        create_file(&file, "data");
+        let abs_path = file.canonicalize().expect("Failed to canonicalize path");
+        let (_stdout, _stderr, exit_code) =
+            run_del(&format!("\"{}\"", abs_path.display()), temp.path());
+        assert_eq!(exit_code, 0, "Absolute path deletion failed");
+        assert!(!file_exists(&file), "File was not deleted via absolute path");
+    }
+
+    // --- Running the binary with no arguments should print usage and error ---
+    #[test]
+    fn no_arguments() {
+        let temp = tempdir().unwrap();
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(DEL_BINARY)
+            .current_dir(temp.path())
+            .output()
+            .expect("Failed to run binary without arguments");
+        assert!(!output.status.success(), "Binary must error when no arguments provided");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("Usage:"), "Expected usage message when no arguments are given");
+    }
+
+    // --- Deletion using a subdirectory in the pattern ---
+    #[test]
+    fn deletion_in_subdirectory() {
+        let temp = tempdir().unwrap();
+        let subdir = temp.path().join("sub");
+        fs::create_dir(&subdir).expect("Failed to create subdirectory");
+        let file = subdir.join("file.txt");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"sub/file.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Deletion using a subdirectory pattern failed");
+        assert!(!file_exists(&file), "File in subdirectory was not deleted");
+    }
+
+    // --- Deletion using a wildcard pattern matching multiple extensions ---
+    #[test]
+    fn deletion_with_multiple_extensions() {
+        let temp = tempdir().unwrap();
+        let file_txt = temp.path().join("file.txt");
+        let file_log = temp.path().join("file.log");
+        create_file(&file_txt, "data");
+        create_file(&file_log, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"file.[tl]??\"", temp.path());
+        assert_eq!(exit_code, 0, "Deletion with wildcard covering multiple extensions failed");
+        assert!(!file_exists(&file_txt), "file.txt was not deleted");
+        assert!(!file_exists(&file_log), "file.log was not deleted");
+    }
+
+    // --- Deletion using an escaped glob pattern ---
+    #[test]
+    fn deletion_with_escaped_chars() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("file[1].txt");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"file\\[1\\].txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Deletion with escaped characters failed");
+        assert!(!file_exists(&file), "File with escaped characters was not deleted");
+    }
+
+    // --- Case‑sensitive matching (pattern in different case should not match) ---
+    #[test]
+    fn case_sensitive_behavior() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("MixedCase.TXT");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"mixedcase.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Case sensitivity test failed");
+        assert!(file_exists(&file), "File should remain because pattern matching is case‑sensitive");
+    }
+
+    // --- Supplying extra arguments causes an error ---
+    #[test]
+    fn extra_arguments_error() {
+        let temp = tempdir().unwrap();
+        let file1 = temp.path().join("a.txt");
+        let file2 = temp.path().join("b.txt");
+        create_file(&file1, "data");
+        create_file(&file2, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"a.txt\" \"b.txt\"", temp.path());
+        assert_ne!(exit_code, 0, "Extra arguments must cause an error");
+        assert!(file_exists(&file1), "File a.txt must not be deleted on error");
+        assert!(file_exists(&file2), "File b.txt must not be deleted on error");
+    }
+
+    // --- Wildcard in the middle of the pattern ---
+    #[test]
+    fn wildcard_in_middle() {
+        let temp = tempdir().unwrap();
+        let file1 = temp.path().join("start_middle_end.txt");
+        let file2 = temp.path().join("start_wrong_end.txt");
+        create_file(&file1, "data");
+        create_file(&file2, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"start*middle*end.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Wildcard in middle deletion failed");
+        assert!(!file_exists(&file1), "File matching pattern was not deleted");
+        assert!(file_exists(&file2), "File not matching pattern was erroneously deleted");
+    }
+
+    // --- A trailing slash in the pattern is invalid ---
+    #[test]
+    fn trailing_slash_error() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("file.txt");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"file.txt/\"", temp.path());
+        assert_ne!(exit_code, 0, "A trailing slash should cause an error");
+        assert!(file_exists(&file), "File must not be deleted when pattern is invalid");
+    }
+
+    // --- An invalid glob pattern produces an error ---
+    #[test]
+    fn invalid_glob_pattern() {
+        let temp = tempdir().unwrap();
+        let (_stdout, _stderr, exit_code) = run_del("\"[abc\"", temp.path());
+        assert_ne!(exit_code, 0, "Invalid glob pattern must error");
+    }
+
+    // --- Deletion of a large number of files ---
+    #[test]
+    fn large_number_files_deletion() {
+        let temp = tempdir().unwrap();
+        for i in 0..100 {
+            let file = temp.path().join(format!("file{:03}.txt", i));
+            create_file(&file, "data");
+        }
+        let (_stdout, _stderr, exit_code) = run_del("\"file*.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Large number files deletion failed");
+        for i in 0..100 {
+            let file = temp.path().join(format!("file{:03}.txt", i));
+            assert!(!file_exists(&file), "File {} was not deleted", file.display());
+        }
+    }
+
+    // --- Deletion of a file with a non‑ASCII filename ---
+    #[test]
+    fn non_ascii_filename_deletion() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("ファイル.txt");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"ファイル.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Non‑ASCII filename deletion failed");
+        assert!(!file_exists(&file), "Non‑ASCII file was not deleted");
+    }
+
+    // --- Success message is output on deletion ---
+    #[test]
+    fn success_message_check() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("success.txt");
+        create_file(&file, "data");
+        let (stdout, _stderr, exit_code) = run_del("\"success.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Deletion should succeed and produce a success message");
+        assert!(stdout.contains("deleted successfully"), "Expected success message not found");
+    }
+
+    // --- No unintended side effects (only matching files are deleted) ---
+    #[test]
+    fn no_unintended_side_effects() {
+        let temp = tempdir().unwrap();
+        let delete_file = temp.path().join("delete_me.txt");
+        let keep_file = temp.path().join("keep_me.txt");
+        create_file(&delete_file, "data");
+        create_file(&keep_file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"delete_me.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Deletion must succeed without side effects");
+        assert!(!file_exists(&delete_file), "Matching file was not deleted");
+        assert!(file_exists(&keep_file), "Non‑matching file was deleted inadvertently");
+    }
+
+    // --- Wide glob pattern deletes only matching files ---
+    #[test]
+    fn wide_glob_pattern() {
+        let temp = tempdir().unwrap();
+        let mut delete_files = Vec::new();
+        let mut keep_files = Vec::new();
+        for i in 0..50 {
+            let file = temp.path().join(format!("match_{}.txt", i));
+            create_file(&file, "data");
+            delete_files.push(file);
+        }
+        for i in 0..50 {
+            let file = temp.path().join(format!("nomatch_{}.txt", i));
+            create_file(&file, "data");
+            keep_files.push(file);
+        }
+        let (_stdout, _stderr, exit_code) = run_del("\"m*.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Wide glob pattern deletion failed");
+        for file in delete_files {
+            assert!(!file_exists(&file), "File {} should be deleted", file.display());
+        }
+        for file in keep_files {
+            assert!(file_exists(&file), "File {} should not be deleted", file.display());
+        }
+    }
+
+    // --- Deletion using the --tokio flag ---
+    #[test]
+    fn deletion_with_tokio_flag() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("tokio.txt");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"tokio.txt\" --tokio", temp.path());
+        assert_eq!(exit_code, 0, "Deletion with --tokio flag failed");
+        assert!(!file_exists(&file), "File was not deleted using --tokio flag");
+    }
+
+    // --- Deletion using the --rayon flag ---
+    #[test]
+    fn deletion_with_rayon_flag() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("rayon.txt");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"rayon.txt\" --rayon", temp.path());
+        assert_eq!(exit_code, 0, "Deletion with --rayon flag failed");
+        assert!(!file_exists(&file), "File was not deleted using --rayon flag");
+    }
+
+    // --- Supplying unexpected extra arguments causes an error ---
+    #[test]
+    fn unexpected_extra_arguments() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("extra.txt");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"extra.txt\" extra_argument", temp.path());
+        assert_ne!(exit_code, 0, "Extra unexpected arguments must cause an error");
+        assert!(file_exists(&file), "File must not be deleted when extra arguments are provided");
+    }
+
+    // --- Sequential deletion path (fewer than 11 files) ---
+    #[test]
+    fn sequential_deletion_behavior() {
+        let temp = tempdir().unwrap();
+        for i in 0..5 {
+            let file = temp.path().join(format!("seq_file_{}.txt", i));
+            create_file(&file, "data");
+        }
+        let (_stdout, _stderr, exit_code) = run_del("\"seq_file_*.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Sequential deletion failed");
+        for i in 0..5 {
+            let file = temp.path().join(format!("seq_file_{}.txt", i));
+            assert!(!file_exists(&file), "File {} was not deleted sequentially", file.display());
         }
     }
 }
