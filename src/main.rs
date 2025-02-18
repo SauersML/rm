@@ -56,7 +56,8 @@ impl<'a> ProgressReporter for RealProgressBar<'a> {
         match Arc::try_unwrap(Arc::clone(&self.bar)) {
             Ok(bar) => bar.finish(),
             Err(_) => {
-                eprintln!("[WARN] Unable to get exclusive ownership of progress bar.");
+                // Fix:
+                // eprintln!("[WARN] Unable to get exclusive ownership of progress bar.");
             }
         }
     }
