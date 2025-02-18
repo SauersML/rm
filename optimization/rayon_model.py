@@ -11,6 +11,7 @@ def main():
     # =======================
     # 1. Load and Prepare Data
     # =======================
+
     # CSV columns: file_count, time_in_seconds, thread_pool_size, batch_size
     df = pd.read_csv("rayon_deletion_benchmark.csv", header=None,
                      names=["file_count", "time_in_seconds", "thread_pool_size", "batch_size"])
