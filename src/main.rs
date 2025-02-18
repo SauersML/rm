@@ -3647,6 +3647,399 @@ mod shell_binary_correctness_tests {
             assert!(!file_exists(&file), "File {} was not deleted sequentially", file.display());
         }
     }
+
+
+    // Glob tests below ========================================
+
+    // 1. Basic literal deletion.
+    #[test]
+    fn literal_deletion() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("literal.txt");
+        create_file(&file, "content");
+        let (_stdout, _stderr, exit_code) = run_del("\"literal.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Literal deletion failed");
+        assert!(!file_exists(&file), "literal.txt was not deleted");
+    }
+
+    // ========================================================================
+    // 2. Deletion using the asterisk (*) wildcard.
+    #[test]
+    fn asterisk_wildcard_deletion() {
+        let temp = tempdir().unwrap();
+        let file1 = temp.path().join("star1.txt");
+        let file2 = temp.path().join("star2.txt");
+        let file3 = temp.path().join("other.txt");
+        create_file(&file1, "data");
+        create_file(&file2, "data");
+        create_file(&file3, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"star*.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Asterisk wildcard deletion failed");
+        assert!(!file_exists(&file1), "star1.txt was not deleted");
+        assert!(!file_exists(&file2), "star2.txt was not deleted");
+        assert!(file_exists(&file3), "other.txt should not be deleted");
+    }
+
+    // ========================================================================
+    // 3. Deletion using the question mark (?) wildcard.
+    #[test]
+    fn question_mark_deletion() {
+        let temp = tempdir().unwrap();
+        let file1 = temp.path().join("file1.txt");
+        let file2 = temp.path().join("file2.txt");
+        let file3 = temp.path().join("file10.txt");
+        create_file(&file1, "data");
+        create_file(&file2, "data");
+        create_file(&file3, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"file?.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Question mark deletion failed");
+        assert!(!file_exists(&file1), "file1.txt was not deleted");
+        assert!(!file_exists(&file2), "file2.txt was not deleted");
+        assert!(file_exists(&file3), "file10.txt should not be deleted");
+    }
+
+    // ========================================================================
+    // 4. Deletion using a character class (e.g., [AB]).
+    #[test]
+    fn character_class_deletion() {
+        let temp = tempdir().unwrap();
+        let file_a = temp.path().join("dataA.txt");
+        let file_b = temp.path().join("dataB.txt");
+        let file_c = temp.path().join("dataC.txt");
+        create_file(&file_a, "data");
+        create_file(&file_b, "data");
+        create_file(&file_c, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"data[AB].txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Character class deletion failed");
+        assert!(!file_exists(&file_a), "dataA.txt was not deleted");
+        assert!(!file_exists(&file_b), "dataB.txt was not deleted");
+        assert!(file_exists(&file_c), "dataC.txt should not be deleted");
+    }
+
+    // ========================================================================
+    // 5. Deletion using alternation {txt,log}.
+    #[test]
+    fn alternation_deletion() {
+        let temp = tempdir().unwrap();
+        let file_txt = temp.path().join("report.txt");
+        let file_log = temp.path().join("report.log");
+        let file_csv = temp.path().join("report.csv");
+        create_file(&file_txt, "data");
+        create_file(&file_log, "data");
+        create_file(&file_csv, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"report.{txt,log}\"", temp.path());
+        assert_eq!(exit_code, 0, "Alternation deletion failed");
+        assert!(!file_exists(&file_txt), "report.txt was not deleted");
+        assert!(!file_exists(&file_log), "report.log was not deleted");
+        assert!(file_exists(&file_csv), "report.csv should not be deleted");
+    }
+
+    // ========================================================================
+    // 6. Deletion using a range in a character class ([0-9]).
+    #[test]
+    fn range_character_class_deletion() {
+        let temp = tempdir().unwrap();
+        let file1 = temp.path().join("file1.txt");
+        let file2 = temp.path().join("file2.txt");
+        let file12 = temp.path().join("file12.txt");
+        create_file(&file1, "data");
+        create_file(&file2, "data");
+        create_file(&file12, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"file[0-9].txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Range character class deletion failed");
+        assert!(!file_exists(&file1), "file1.txt was not deleted");
+        assert!(!file_exists(&file2), "file2.txt was not deleted");
+        assert!(file_exists(&file12), "file12.txt should not be deleted");
+    }
+
+    // ========================================================================
+    // 7. Deletion using escaped characters for literal brackets.
+    #[test]
+    fn escaped_brackets_deletion() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("file[1].txt");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"file\\[1\\].txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Escaped brackets deletion failed");
+        assert!(!file_exists(&file), "file[1].txt was not deleted");
+    }
+
+    // ========================================================================
+    // 8. Deletion using escaped asterisk for a literal asterisk.
+    #[test]
+    fn escaped_asterisk_deletion() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("file*.txt");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"file[*].txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Escaped asterisk deletion failed");
+        assert!(!file_exists(&file), "file*.txt was not deleted");
+    }
+
+    // ========================================================================
+    // 9. Deletion using combined wildcards: both '*' and '?'.
+    #[test]
+    fn combined_wildcards_deletion() {
+        let temp = tempdir().unwrap();
+        let file_match = temp.path().join("fxxe1.txt");
+        let file_nomatch = temp.path().join("fxxe12.txt");
+        create_file(&file_match, "data");
+        create_file(&file_nomatch, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"f*e?.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Combined wildcards deletion failed");
+        assert!(!file_exists(&file_match), "fxxe1.txt was not deleted");
+        assert!(file_exists(&file_nomatch), "fxxe12.txt should not be deleted");
+    }
+
+    // ========================================================================
+    // 10. Deletion using an exact-length pattern: exactly three characters using '?'.
+    #[test]
+    fn exact_length_question_mark_deletion() {
+        let temp = tempdir().unwrap();
+        let file_match = temp.path().join("abc.txt");
+        let file_nomatch = temp.path().join("abcd.txt");
+        create_file(&file_match, "data");
+        create_file(&file_nomatch, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"???.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Exact length question mark deletion failed");
+        assert!(!file_exists(&file_match), "abc.txt was not deleted");
+        assert!(file_exists(&file_nomatch), "abcd.txt should not be deleted");
+    }
+
+    // ========================================================================
+    // 11. Negated character class deletion test 1:
+    // Pattern "file[!X].txt" should delete files not having 'X' in that slot.
+    #[test]
+    fn negated_character_class_deletion_1() {
+        let temp = tempdir().unwrap();
+        let file_excluded = temp.path().join("fileX.txt");
+        let file_deleted = temp.path().join("fileY.txt");
+        create_file(&file_excluded, "data");
+        create_file(&file_deleted, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"file[!X].txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Negated character class deletion 1 failed");
+        assert!(file_exists(&file_excluded), "fileX.txt should not be deleted");
+        assert!(!file_exists(&file_deleted), "fileY.txt was not deleted");
+    }
+
+    // ========================================================================
+    // 12. Negated character class deletion test 2:
+    // Pattern "data[!0-9].txt" should avoid files with a digit in that slot.
+    #[test]
+    fn negated_character_class_deletion_2() {
+        let temp = tempdir().unwrap();
+        let file_deleted = temp.path().join("dataA.txt");
+        let file_excluded = temp.path().join("data1.txt");
+        create_file(&file_deleted, "data");
+        create_file(&file_excluded, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"data[!0-9].txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Negated character class deletion 2 failed");
+        assert!(!file_exists(&file_deleted), "dataA.txt was not deleted");
+        assert!(file_exists(&file_excluded), "data1.txt should not be deleted");
+    }
+
+    // ========================================================================
+    // 13. Negated character class deletion test 3:
+    // Pattern "log[!e]file.txt" should not match when the second character is 'e'.
+    #[test]
+    fn negated_character_class_deletion_3() {
+        let temp = tempdir().unwrap();
+        let file_excluded = temp.path().join("logefile.txt");
+        let file_deleted = temp.path().join("logifile.txt");
+        create_file(&file_excluded, "data");
+        create_file(&file_deleted, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"log[!e]file.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Negated character class deletion 3 failed");
+        assert!(file_exists(&file_excluded), "logefile.txt should not be deleted");
+        assert!(!file_exists(&file_deleted), "logifile.txt was not deleted");
+    }
+
+    // ========================================================================
+    // 14. Negated character class deletion test 4:
+    // Pattern "report[!_.].txt" should not match if the char is '_' or '.'.
+    #[test]
+    fn negated_character_class_deletion_4() {
+        let temp = tempdir().unwrap();
+        let file_excluded = temp.path().join("report_.txt");
+        let file_deleted = temp.path().join("report-.txt");
+        create_file(&file_excluded, "data");
+        create_file(&file_deleted, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"report[!_.].txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Negated character class deletion 4 failed");
+        assert!(file_exists(&file_excluded), "report_.txt should not be deleted");
+        assert!(!file_exists(&file_deleted), "report-.txt was not deleted");
+    }
+
+    // ========================================================================
+    // 15. Negated character class deletion test 5:
+    // Pattern "img[!0].png" should avoid deleting a file whose char is '0'.
+    #[test]
+    fn negated_character_class_deletion_5() {
+        let temp = tempdir().unwrap();
+        let file_excluded = temp.path().join("img0.png");
+        let file_deleted = temp.path().join("img1.png");
+        create_file(&file_excluded, "data");
+        create_file(&file_deleted, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"img[!0].png\"", temp.path());
+        assert_eq!(exit_code, 0, "Negated character class deletion 5 failed");
+        assert!(file_exists(&file_excluded), "img0.png should not be deleted");
+        assert!(!file_exists(&file_deleted), "img1.png was not deleted");
+    }
+
+    // ========================================================================
+    // 16. Negated character class deletion test 6:
+    // “Delete this except for that”: delete files that do NOT have an underscore
+    // immediately after "target". That is, delete "target.txt" but not "target_excluded.txt".
+    #[test]
+    fn negated_character_class_deletion_6() {
+        let temp = tempdir().unwrap();
+        let file_deleted = temp.path().join("target.txt");
+        let file_excluded = temp.path().join("target_excluded.txt");
+        create_file(&file_deleted, "data");
+        create_file(&file_excluded, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"target[!_]*.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Negated character class deletion 6 failed");
+        assert!(!file_exists(&file_deleted), "target.txt was not deleted");
+        assert!(file_exists(&file_excluded), "target_excluded.txt should not be deleted");
+    }
+
+    // ========================================================================
+    // 17. Repeat literal deletion for extra coverage.
+    #[test]
+    fn literal_deletion_repeat() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("exact.txt");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"exact.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Literal deletion repeat failed");
+        assert!(!file_exists(&file), "exact.txt was not deleted");
+    }
+
+    // ========================================================================
+    // 18. Deletion of a hidden file using a leading dot pattern.
+    #[test]
+    fn hidden_file_deletion() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join(".hidden.txt");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\".*.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Hidden file deletion failed");
+        assert!(!file_exists(&file), ".hidden.txt was not deleted");
+    }
+
+    // ========================================================================
+    // 19. Deletion using multiple asterisks in sequence: "a*b*c.txt"
+    #[test]
+    fn multiple_asterisk_deletion() {
+        let temp = tempdir().unwrap();
+        let file_match = temp.path().join("a123b456c.txt");
+        let file_nomatch = temp.path().join("a123b456d.txt");
+        create_file(&file_match, "data");
+        create_file(&file_nomatch, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"a*b*c.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Multiple asterisk deletion failed");
+        assert!(!file_exists(&file_match), "a123b456c.txt was not deleted");
+        assert!(file_exists(&file_nomatch), "a123b456d.txt should not be deleted");
+    }
+
+    // ========================================================================
+    // 20. Deletion using exactly four characters via '?' pattern: "????.txt"
+    #[test]
+    fn four_char_question_mark_deletion() {
+        let temp = tempdir().unwrap();
+        let file_match = temp.path().join("abcd.txt");
+        let file_nomatch = temp.path().join("abcde.txt");
+        create_file(&file_match, "data");
+        create_file(&file_nomatch, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"????.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Four-character question mark deletion failed");
+        assert!(!file_exists(&file_match), "abcd.txt was not deleted");
+        assert!(file_exists(&file_nomatch), "abcde.txt should not be deleted");
+    }
+
+    // ========================================================================
+    // 21. Deletion using a combination of '*' and '?' wildcards: "data*?.log"
+    #[test]
+    fn combined_asterisk_question_deletion() {
+        let temp = tempdir().unwrap();
+        let file_match = temp.path().join("dataX.log");
+        let file_nomatch = temp.path().join("data.log");
+        create_file(&file_match, "data");
+        create_file(&file_nomatch, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"data*?.log\"", temp.path());
+        assert_eq!(exit_code, 0, "Combined asterisk and question mark deletion failed");
+        assert!(!file_exists(&file_match), "dataX.log was not deleted");
+        assert!(file_exists(&file_nomatch), "data.log should not be deleted");
+    }
+
+    // ========================================================================
+    // 22. Deletion using alternation with three options: "log.{txt,csv,log}"
+    #[test]
+    fn alternation_three_options_deletion() {
+        let temp = tempdir().unwrap();
+        let file_txt = temp.path().join("log.txt");
+        let file_csv = temp.path().join("log.csv");
+        let file_log = temp.path().join("log.log");
+        let file_md = temp.path().join("log.md");
+        create_file(&file_txt, "data");
+        create_file(&file_csv, "data");
+        create_file(&file_log, "data");
+        create_file(&file_md, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"log.{txt,csv,log}\"", temp.path());
+        assert_eq!(exit_code, 0, "Alternation with three options deletion failed");
+        assert!(!file_exists(&file_txt), "log.txt was not deleted");
+        assert!(!file_exists(&file_csv), "log.csv was not deleted");
+        assert!(!file_exists(&file_log), "log.log was not deleted");
+        assert!(file_exists(&file_md), "log.md should not be deleted");
+    }
+
+    // ========================================================================
+    // 23. Deletion using a letter range in a character class: "alpha[a-c].txt"
+    #[test]
+    fn letter_range_deletion() {
+        let temp = tempdir().unwrap();
+        let file_a = temp.path().join("alphaa.txt");
+        let file_b = temp.path().join("alphab.txt");
+        let file_d = temp.path().join("alphad.txt");
+        create_file(&file_a, "data");
+        create_file(&file_b, "data");
+        create_file(&file_d, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"alpha[a-c].txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Letter range deletion failed");
+        assert!(!file_exists(&file_a), "alphaa.txt was not deleted");
+        assert!(!file_exists(&file_b), "alphab.txt was not deleted");
+        assert!(file_exists(&file_d), "alphad.txt should not be deleted");
+    }
+
+    // ========================================================================
+    // 24. Deletion using complex alternation and a wildcard: "test{1,2}*.txt"
+    #[test]
+    fn complex_alternation_wildcard_deletion() {
+        let temp = tempdir().unwrap();
+        let file1 = temp.path().join("test1.txt");
+        let file2 = temp.path().join("test2_extra.txt");
+        let file3 = temp.path().join("test3.txt");
+        create_file(&file1, "data");
+        create_file(&file2, "data");
+        create_file(&file3, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"test{1,2}*.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Complex alternation and wildcard deletion failed");
+        assert!(!file_exists(&file1), "test1.txt was not deleted");
+        assert!(!file_exists(&file2), "test2_extra.txt was not deleted");
+        assert!(file_exists(&file3), "test3.txt should not be deleted");
+    }
+
+    // ========================================================================
+    // 25. Deletion using an escaped question mark for a literal question mark.
+    #[test]
+    fn escaped_question_mark_deletion() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("log?.txt");
+        create_file(&file, "data");
+        let (_stdout, _stderr, exit_code) = run_del("\"log\\?.txt\"", temp.path());
+        assert_eq!(exit_code, 0, "Escaped question mark deletion failed");
+        assert!(!file_exists(&file), "log?.txt was not deleted");
+    }
 }
 
 
