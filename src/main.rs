@@ -1,23 +1,16 @@
-use std::{
-    ffi::CString,
-    io,
-    path::Path,
-    sync::{
-        Arc,
-    },
-};
+use std::{ffi::CString, io, path::Path, sync::Arc};
 
 use futures::StreamExt;
-use num_cpus;
+use globset::GlobSet;
+use globset::{Glob, GlobSetBuilder};
 use lazy_static::lazy_static;
+use num_cpus;
 use progression::{Bar, Config};
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
-use globset::{Glob, GlobSetBuilder};
-use rayon::ThreadPoolBuilder;
-use rayon::prelude::*;
-use std::ffi::OsStr;
-use globset::GlobSet;
 
 lazy_static! {
     // Cache the number of CPUs and its f64 conversion as a static variable.
@@ -244,7 +237,6 @@ fn main() {
     }
 }
 
-
 /// Main async entry point
 #[cfg(not(target_os = "macos"))]
 async fn run_deletion_tokio<P: ProgressReporter + Clone>(
@@ -269,23 +261,21 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
     let pr_for_tasks = progress_reporter.clone();
     file_stream
         .for_each_concurrent(Some(concurrency), move |filename_cstr| {
-            {
-                let progress_reporter_value = pr_for_tasks.clone();
-                async move {
-                    let progress_reporter = progress_reporter_value.clone();
-                    let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
+            let progress_reporter_value = pr_for_tasks.clone();
+            async move {
+                let progress_reporter = progress_reporter_value.clone();
+                let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
 
-                    if result == 0 {
-                        progress_reporter.inc(1);
-                    } else {
-                        let e = io::Error::last_os_error();
-                        eprintln!(
-                            "Failed to delete '{}': {}",
-                            filename_cstr.to_string_lossy(),
-                            e
-                        );
-                        std::process::exit(1);
-                    }
+                if result == 0 {
+                    progress_reporter.inc(1);
+                } else {
+                    let e = io::Error::last_os_error();
+                    eprintln!(
+                        "Failed to delete '{}': {}",
+                        filename_cstr.to_string_lossy(),
+                        e
+                    );
+                    std::process::exit(1);
                 }
             }
         })
@@ -326,7 +316,7 @@ fn run_deletion_rayon<P: ProgressReporter + Clone + Sync>(
         .map_err(|e| {
             io::Error::new(
                 io::ErrorKind::Other,
-                format!("Failed to build Rayon thread pool: {}", e)
+                format!("Failed to build Rayon thread pool: {}", e),
             )
         })?;
 
@@ -361,7 +351,6 @@ fn run_deletion_rayon<P: ProgressReporter + Clone + Sync>(
     Ok(())
 }
 
-
 #[inline(always)]
 pub fn compute_optimal_tokio(num_files: usize, simulated_cpus: usize) -> f64 {
     // Convert the number of files to a float and compute its natural logarithm
@@ -369,10 +358,11 @@ pub fn compute_optimal_tokio(num_files: usize, simulated_cpus: usize) -> f64 {
     // Convert the number of simulated CPUs to a float and compute its natural logarithm
     let ln_simulated_cpus = (simulated_cpus as f64).ln();
     // Compute the optimal concurrency using the derived model:
-    let optimal_concurrency = 23.7282581922052 * (0.138095238095238 * ln_num_files * ln_simulated_cpus - 0.552380952380952 * ln_num_files).exp();
+    let optimal_concurrency = 23.7282581922052
+        * (0.138095238095238 * ln_num_files * ln_simulated_cpus - 0.552380952380952 * ln_num_files)
+            .exp();
     optimal_concurrency
 }
-
 
 #[inline(always)]
 pub fn compute_optimal_rayon(file_count: usize) -> (f64, f64) {
@@ -383,11 +373,16 @@ pub fn compute_optimal_rayon(file_count: usize) -> (f64, f64) {
 
     // Compute optimal thread_pool_size:
     // exp((169000.0 - 49112.0 * log_file_count) / (27.0 * log_file_count^2 - 91936.0))
-    let optimal_thread_pool_size = ((169_000.0 - 49_112.0 * log_file_count) / (27.0 * log_file_count_squared - 91_936.0)).exp();
+    let optimal_thread_pool_size = ((169_000.0 - 49_112.0 * log_file_count)
+        / (27.0 * log_file_count_squared - 91_936.0))
+        .exp();
 
     // Compute optimal batch_size:
     // exp((9171.0 * log_file_count^2 - 29250.0 * log_file_count - 2284256.0) / (81.0 * log_file_count^2 - 275808.0))
-    let optimal_batch_size = ((9_171.0 * log_file_count_squared - 29_250.0 * log_file_count - 2_284_256.0) / (81.0 * log_file_count_squared - 275_808.0)).exp();
+    let optimal_batch_size =
+        ((9_171.0 * log_file_count_squared - 29_250.0 * log_file_count - 2_284_256.0)
+            / (81.0 * log_file_count_squared - 275_808.0))
+            .exp();
 
     (optimal_thread_pool_size, optimal_batch_size)
 }
@@ -407,11 +402,14 @@ fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>)>> {
 
     // Build the globset matcher
     let mut gs_builder = GlobSetBuilder::new();
-    gs_builder.add(
-        Glob::new(file_pattern)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid glob pattern: {}", e)))?
-    );
-    let glob_set = gs_builder.build()
+    gs_builder.add(Glob::new(file_pattern).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Invalid glob pattern: {}", e),
+        )
+    })?);
+    let glob_set = gs_builder
+        .build()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("GlobSet build error: {}", e)))?;
 
     // Collect matching files
@@ -428,15 +426,14 @@ fn count_matches(pattern: &str) -> io::Result<Option<(RawFd, Vec<CString>)>> {
     Ok(Some((fd, matched_files)))
 }
 
-
 #[cfg(target_os = "linux")]
-fn collect_matching_files(
-    dir: &Path,
-    matcher: &GlobSet,
-) -> io::Result<(RawFd, Vec<CString>)> {
+fn collect_matching_files(dir: &Path, matcher: &GlobSet) -> io::Result<(RawFd, Vec<CString>)> {
     // Open the directory using the raw syscall interface
     let c_path = std::ffi::CString::new(dir.as_os_str().as_bytes()).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "Directory path contains null byte")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Directory path contains null byte",
+        )
     })?;
 
     unsafe {
@@ -444,9 +441,9 @@ fn collect_matching_files(
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
         }
-        
+
         libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL);
-        
+
         // Allocate a large buffer to minimize syscall overhead
         let buf_size = 1 << 26; // 64 MB
         let mut buf = vec![0u8; buf_size];
@@ -532,34 +529,33 @@ pub fn sequential_delete(files: &[std::ffi::CString], dir_fd: libc::c_int) -> st
 // MACOS FUNCTIONS ============================================================================================
 // ============================================================================================================
 
-
 #[cfg(target_os = "macos")]
-fn collect_matching_files(
-    dir: &Path,
-    matcher: &GlobSet,
-) -> io::Result<(RawFd, Vec<CString>)> {
+fn collect_matching_files(dir: &Path, matcher: &GlobSet) -> io::Result<(RawFd, Vec<CString>)> {
     // Convert the directory path into a CString.
     let c_path = CString::new(dir.as_os_str().as_bytes()).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "Directory path contains null byte")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Directory path contains null byte",
+        )
     })?;
-    
+
     unsafe {
         // Open the directory using opendir (returns a DIR*).
         let dir_stream = libc::opendir(c_path.as_ptr());
         if dir_stream.is_null() {
             return Err(std::io::Error::last_os_error());
         }
-        
+
         // Get the raw file descriptor associated with the directory stream.
         let mac_fd = libc::dirfd(dir_stream);
         if mac_fd < 0 {
             libc::closedir(dir_stream);
             return Err(std::io::Error::last_os_error());
         }
-        
+
         // Set read-ahead advice.
         libc::fcntl(mac_fd, libc::F_RDADVISE, 0);
-        
+
         let mut files = Vec::new();
         loop {
             // Read a directory entry.
@@ -571,7 +567,8 @@ fn collect_matching_files(
             // Process only regular files.
             if entry.d_type == libc::DT_REG {
                 let name_len = entry.d_namlen as usize;
-                let name_slice = std::slice::from_raw_parts(entry.d_name.as_ptr() as *const u8, name_len);
+                let name_slice =
+                    std::slice::from_raw_parts(entry.d_name.as_ptr() as *const u8, name_len);
                 if name_slice == b"." || name_slice == b".." {
                     continue;
                 }
@@ -579,9 +576,7 @@ fn collect_matching_files(
                 if matcher.is_match(os_str) {
                     // Form the full path by joining the directory path with the filename.
                     let full_path = dir.join(os_str);
-                    if let Ok(full_path_cstr) =
-                        CString::new(full_path.as_os_str().as_bytes())
-                    {
+                    if let Ok(full_path_cstr) = CString::new(full_path.as_os_str().as_bytes()) {
                         files.push(full_path_cstr);
                     }
                 }
@@ -623,7 +618,7 @@ fn run_deletion_rayon<P: ProgressReporter + Clone + Sync>(
         .map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Failed to build Rayon thread pool: {}", e)
+                format!("Failed to build Rayon thread pool: {}", e),
             )
         })?;
 
@@ -652,7 +647,6 @@ fn run_deletion_rayon<P: ProgressReporter + Clone + Sync>(
 
     Ok(())
 }
-
 
 #[cfg(target_os = "macos")]
 async fn run_deletion_tokio<P: ProgressReporter + Clone>(
@@ -715,7 +709,6 @@ pub fn sequential_delete(files: &[std::ffi::CString]) -> std::io::Result<()> {
     Ok(())
 }
 
-
 // ====================================================================================================================================
 // ====================================================================================================================================
 // ====================================================================================================================================
@@ -762,10 +755,8 @@ mod simple_shell {
     /// Prepares a fresh test directory for one benchmark iteration.
     /// The directory is created at: BASE_TEST_DIR/<test_name>_<command_type>_iter<iteration>
     fn prepare_test_directory(test_name: &str, command_type: &str, iteration: usize) -> PathBuf {
-        let dir_path = base_test_dir().join(format!(
-            "{}_{}_iter{}",
-            test_name, command_type, iteration
-        ));
+        let dir_path =
+            base_test_dir().join(format!("{}_{}_iter{}", test_name, command_type, iteration));
         if dir_path.exists() {
             fs::remove_dir_all(&dir_path)
                 .unwrap_or_else(|e| panic!("Failed to remove {}: {}", dir_path.display(), e));
@@ -811,7 +802,10 @@ mod simple_shell {
         }
 
         if count > 0 {
-            println!("DEBUG: Found {} undeleted file(s) matching '{}':", count, pattern);
+            println!(
+                "DEBUG: Found {} undeleted file(s) matching '{}':",
+                count, pattern
+            );
             for file in undeleted_files {
                 println!("DEBUG: {}", file.display());
             }
@@ -1053,7 +1047,11 @@ mod simple_shell {
 
         println!("\nStarting burn-in period ({} iterations)...", BURN_IN);
         for i in 0..BURN_IN {
-            let method = if rng.random_bool(0.5) { "rust" } else { "system" };
+            let method = if rng.random_bool(0.5) {
+                "rust"
+            } else {
+                "system"
+            };
             let _ = run_single_benchmark(test_name, method, i);
         }
         println!("Burn-in complete.\n");
@@ -1062,7 +1060,11 @@ mod simple_shell {
         let mut system_times: Vec<f64> = Vec::new();
 
         for i in 0..ITERATIONS {
-            let method = if rng.random_bool(0.5) { "rust" } else { "system" };
+            let method = if rng.random_bool(0.5) {
+                "rust"
+            } else {
+                "system"
+            };
             let elapsed = run_single_benchmark(test_name, method, BURN_IN + i);
             if method == "rust" {
                 rust_times.push(elapsed);
@@ -1134,7 +1136,6 @@ mod simple_shell {
     }
 }
 
-
 // cargo test --release -- --nocapture shell_performance
 #[cfg(test)]
 mod shell_performance {
@@ -1183,7 +1184,8 @@ mod shell_performance {
     /// The directory will be created at:
     ///   BASE_TEST_DIR/<test_name>_<command_type>_iter<iteration>
     fn prepare_test_directory(test_name: &str, command_type: &str, iteration: usize) -> PathBuf {
-        let dir_path = base_test_dir().join(format!("{}_{}_iter{}", test_name, command_type, iteration));
+        let dir_path =
+            base_test_dir().join(format!("{}_{}_iter{}", test_name, command_type, iteration));
 
         // Remove the directory if it already exists.
         if dir_path.exists() {
@@ -1240,11 +1242,17 @@ mod shell_performance {
         }
 
         if count > 0 {
-            println!("DEBUG: Found {} undeleted file(s) matching '{}':", count, pattern);
+            println!(
+                "DEBUG: Found {} undeleted file(s) matching '{}':",
+                count, pattern
+            );
             for file in undeleted_files {
                 println!("DEBUG: {}", file.display());
             }
-            panic!("Deletion failed: {} file(s) still exist matching {}", count, pattern);
+            panic!(
+                "Deletion failed: {} file(s) still exist matching {}",
+                count, pattern
+            );
         }
     }
 
@@ -1329,7 +1337,10 @@ mod shell_performance {
             format!("target/release/del \"{}\"", pattern)
         } else {
             if file_count == 1_000_000 {
-                format!("find {} -maxdepth 1 -type f -delete", dir_path.to_string_lossy())
+                format!(
+                    "find {} -maxdepth 1 -type f -delete",
+                    dir_path.to_string_lossy()
+                )
             } else {
                 format!("rm -f {}/t*.dat", dir_path.to_string_lossy())
             }
@@ -1353,7 +1364,10 @@ mod shell_performance {
     /// This function executes both the Rust binary deletion and the system deletion commands
     /// over multiple iterations and then prints comprehensive statistics.
     /// Returns a tuple of SummaryResult: (rust_result, system_result).
-    fn run_benchmark_for_file_count(test_name: &str, file_count: usize) -> (SummaryResult, SummaryResult) {
+    fn run_benchmark_for_file_count(
+        test_name: &str,
+        file_count: usize,
+    ) -> (SummaryResult, SummaryResult) {
         println!("\n===== {}: {} file(s) =====", test_name, file_count);
         println!("Using base test directory: {}", base_test_dir().display());
 
@@ -1413,7 +1427,8 @@ mod shell_performance {
         let mut summary_results = Vec::new();
 
         for &count in &file_counts {
-            let (rust_result, system_result) = run_benchmark_for_file_count("Deletion_Benchmark", count);
+            let (rust_result, system_result) =
+                run_benchmark_for_file_count("Deletion_Benchmark", count);
             summary_results.push(rust_result);
             summary_results.push(system_result);
         }
@@ -1423,7 +1438,14 @@ mod shell_performance {
         println!("\n===== Summary of Benchmark Results =====");
         println!(
             "{:<20} {:<12} {:<12} {:<8} {:<8} {:<8} {:<8} {:<8}",
-            "Test Name", "File Count", "Cmd Type", "Min(s)", "Max(s)", "Mean(s)", "Median(s)", "StdDev(s)"
+            "Test Name",
+            "File Count",
+            "Cmd Type",
+            "Min(s)",
+            "Max(s)",
+            "Mean(s)",
+            "Median(s)",
+            "StdDev(s)"
         );
         println!("{}", "-".repeat(90));
         for result in summary_results {
@@ -1466,7 +1488,6 @@ mod t_r_performance {
         std::path::PathBuf::from(home).join("tmp_test")
     }
 
-
     /// Returns filesystem info (using `df -T`) for the given directory.
     fn get_filesystem_info(dir: &Path) -> String {
         let output = Command::new("df")
@@ -1481,8 +1502,8 @@ mod t_r_performance {
     /// The directory will be created at:
     ///   BASE_TEST_DIR/<test_name>_<command_type>_iter<iteration>
     fn prepare_test_directory(test_name: &str, command_type: &str, iteration: usize) -> PathBuf {
-    let dir_path = base_test_dir()
-        .join(format!("{}_{}_iter{}", test_name, command_type, iteration));
+        let dir_path =
+            base_test_dir().join(format!("{}_{}_iter{}", test_name, command_type, iteration));
 
         // Remove the directory if it already exists
         if dir_path.exists() {
@@ -1526,7 +1547,10 @@ mod t_r_performance {
             }
         }
         if count > 0 {
-            panic!("Deletion failed: {} file(s) still exist matching {}", count, pattern);
+            panic!(
+                "Deletion failed: {} file(s) still exist matching {}",
+                count, pattern
+            );
         }
     }
 
@@ -1575,11 +1599,7 @@ mod t_r_performance {
         } else {
             sorted[sorted.len() / 2]
         };
-        let variance = times
-            .iter()
-            .map(|t| (t - mean).powi(2))
-            .sum::<f64>()
-            / times.len() as f64;
+        let variance = times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / times.len() as f64;
         let stddev = variance.sqrt();
         (min, max, mean, median, stddev)
     }
@@ -1804,6 +1824,7 @@ mod t_r_performance {
 // cargo test --release -- --nocapture performance_tests
 #[cfg(test)]
 mod performance_tests {
+    use glob;
     use std::{
         fs::{self, File},
         io::Write,
@@ -1813,7 +1834,6 @@ mod performance_tests {
     };
     use tempfile::tempdir;
     use tokio::runtime::Builder;
-    use glob;
 
     use super::{count_matches, run_deletion_tokio, NoOpProgressBar, Progress};
 
@@ -1988,14 +2008,20 @@ mod performance_tests {
         let (pattern, create_fn): (String, fn(&Path, usize, usize) -> Vec<PathBuf>) =
             if use_short_names {
                 let pattern = base_path.join("[0-9a-z]*");
-                (pattern.to_string_lossy().to_string(), create_short_test_files)
+                (
+                    pattern.to_string_lossy().to_string(),
+                    create_short_test_files,
+                )
             } else {
                 let pattern = base_path.join("t*.dat");
                 (pattern.to_string_lossy().to_string(), create_test_files)
             };
 
         println!("\n--- {} ---", test_name);
-        println!("Creating {} files ({} KB each)...", file_count, file_size_kb);
+        println!(
+            "Creating {} files ({} KB each)...",
+            file_count, file_size_kb
+        );
 
         // Create files and run the Rust deletion routine.
         create_fn(&base_path, file_count, file_size_kb);
@@ -2027,13 +2053,55 @@ mod performance_tests {
 
         let mut results = Vec::new();
         results.push(run_benchmark("One file (10 x 10 KB)", 10, 10, false, false));
-        results.push(run_benchmark("Small files (10 x 1 KB)", 10, 1, false, false));
-        results.push(run_benchmark("Some small files (30,000 x 1 KB)", 30_000, 1, false, false));
-        results.push(run_benchmark("Many small files (100,000 x 1 KB)", 100_000, 1, true, true));
-        results.push(run_benchmark("A ton of small files (500,000 x 1 KB)", 500_000, 1, true, true));
-        results.push(run_benchmark("Large files (100 x 10 MB)", 100, 10240, false, false));
-        results.push(run_benchmark("Medium files (50 x 100 KB)", 50, 100, false, false));
-        results.push(run_benchmark("Huge files (10 x 50 MB)", 10, 51200, false, false));
+        results.push(run_benchmark(
+            "Small files (10 x 1 KB)",
+            10,
+            1,
+            false,
+            false,
+        ));
+        results.push(run_benchmark(
+            "Some small files (30,000 x 1 KB)",
+            30_000,
+            1,
+            false,
+            false,
+        ));
+        results.push(run_benchmark(
+            "Many small files (100,000 x 1 KB)",
+            100_000,
+            1,
+            true,
+            true,
+        ));
+        results.push(run_benchmark(
+            "A ton of small files (500,000 x 1 KB)",
+            500_000,
+            1,
+            true,
+            true,
+        ));
+        results.push(run_benchmark(
+            "Large files (100 x 10 MB)",
+            100,
+            10240,
+            false,
+            false,
+        ));
+        results.push(run_benchmark(
+            "Medium files (50 x 100 KB)",
+            50,
+            100,
+            false,
+            false,
+        ));
+        results.push(run_benchmark(
+            "Huge files (10 x 50 MB)",
+            10,
+            51200,
+            false,
+            false,
+        ));
 
         println!("\n===== Performance Summary =====\n");
         println!(
@@ -2163,7 +2231,6 @@ mod performance_tests {
         }
     }
 }
-
 
 // cargo test --release -- --nocapture tokio_tune
 #[cfg(test)]
@@ -2309,8 +2376,6 @@ mod tokio_tune {
     }
 }
 
-
-
 // cargo test --release -- --nocapture file_count_tests
 #[cfg(target_os = "linux")]
 #[cfg(test)]
@@ -2322,11 +2387,11 @@ mod file_count_tests {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    use scandir::{Count, Walk, Scandir};
+    use libc;
+    use rayon::prelude::*;
+    use scandir::{Count, Scandir, Walk};
     use tempfile::tempdir;
     use walkdir::WalkDir;
-    use rayon::prelude::*;
-    use libc;
 
     // Declare an external binding for scandir from the C library.
     extern "C" {
@@ -2334,7 +2399,12 @@ mod file_count_tests {
             dir: *const libc::c_char,
             namelist: *mut *mut *mut libc::dirent,
             filter: Option<unsafe extern "C" fn(*const libc::dirent) -> libc::c_int>,
-            compar: Option<unsafe extern "C" fn(*const *const libc::dirent, *const *const libc::dirent) -> libc::c_int>,
+            compar: Option<
+                unsafe extern "C" fn(
+                    *const *const libc::dirent,
+                    *const *const libc::dirent,
+                ) -> libc::c_int,
+            >,
         ) -> libc::c_int;
     }
 
@@ -2362,10 +2432,7 @@ mod file_count_tests {
     // Uses std::fs::read_dir without any extra filtering.
     fn count_using_read_dir(path: &Path) -> (usize, Duration) {
         let start = Instant::now();
-        let count = fs::read_dir(path)
-            .unwrap()
-            .filter_map(Result::ok)
-            .count();
+        let count = fs::read_dir(path).unwrap().filter_map(Result::ok).count();
         (count, start.elapsed())
     }
 
@@ -2375,9 +2442,7 @@ mod file_count_tests {
         let count = fs::read_dir(path)
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|entry| {
-                entry.file_type().map(|ft| ft.is_file()).unwrap_or(false)
-            })
+            .filter(|entry| entry.file_type().map(|ft| ft.is_file()).unwrap_or(false))
             .count();
         (count, start.elapsed())
     }
@@ -2401,9 +2466,7 @@ mod file_count_tests {
             .unwrap()
             .par_bridge()
             .filter_map(Result::ok)
-            .filter(|entry| {
-                entry.file_type().map(|ft| ft.is_file()).unwrap_or(false)
-            })
+            .filter(|entry| entry.file_type().map(|ft| ft.is_file()).unwrap_or(false))
             .count();
         (count, start.elapsed())
     }
@@ -2518,7 +2581,10 @@ mod file_count_tests {
 
         // Create a Count instance and collect the file statistics.
         let stats = Count::new(dir_path)?.collect()?;
-        assert_eq!(stats.files, num_files, "Count API did not report the expected number of files");
+        assert_eq!(
+            stats.files, num_files,
+            "Count API did not report the expected number of files"
+        );
         Ok(())
     }
 
@@ -2538,7 +2604,11 @@ mod file_count_tests {
         let entries = Walk::new(dir_path, None)?.collect()?;
         // Walk typically returns only the files in the root (when not recursing),
         // so we expect exactly `num_files` entries.
-        assert_eq!(entries.files.len(), num_files, "Walk API did not yield the expected number of file entries");
+        assert_eq!(
+            entries.files.len(),
+            num_files,
+            "Walk API did not yield the expected number of file entries"
+        );
         Ok(())
     }
 
@@ -2557,16 +2627,23 @@ mod file_count_tests {
         // Create a Scandir instance and collect the detailed entries.
         let entries = Scandir::new(dir_path, None)?.collect()?;
         // Filter only entries that are files (in case directories are also returned).
-        let file_count = entries.results.iter().filter(|entry| match entry {
-            &scandir::ScandirResult::DirEntry(ref de) => de.is_file,
-            &scandir::ScandirResult::DirEntryExt(ref de) => de.is_file,
-            &scandir::ScandirResult::Error(_) => false,
-        }).count();
-        assert_eq!(file_count, num_files, "Scandir API did not return the expected number of file entries");
+        let file_count = entries
+            .results
+            .iter()
+            .filter(|entry| match entry {
+                &scandir::ScandirResult::DirEntry(ref de) => de.is_file,
+                &scandir::ScandirResult::DirEntryExt(ref de) => de.is_file,
+                &scandir::ScandirResult::Error(_) => false,
+            })
+            .count();
+        assert_eq!(
+            file_count, num_files,
+            "Scandir API did not return the expected number of file entries"
+        );
         Ok(())
     }
 
-        // Extremely optimized file counting using Rust std::fs::read_dir.
+    // Extremely optimized file counting using Rust std::fs::read_dir.
     fn count_using_read_dir_fast(path: &Path) -> (usize, Duration) {
         let start = Instant::now();
         let count = fs::read_dir(path)
@@ -2678,15 +2755,19 @@ mod file_count_tests {
 
         let (c, t) = count_using_getdents64_fast(dir_path);
         results.push(("Raw getdents64 fast", c, t));
-        
+
         // Using scandir-rs's Count API:
         {
             let start = Instant::now();
             let stats = Count::new(dir_path)?.collect()?;
             let duration = start.elapsed();
-            results.push(("scandir Count API", stats.files.try_into().unwrap(), duration));
+            results.push((
+                "scandir Count API",
+                stats.files.try_into().unwrap(),
+                duration,
+            ));
         }
-        
+
         // Using scandir-rs's Walk API:
         {
             let start = Instant::now();
@@ -2695,20 +2776,23 @@ mod file_count_tests {
             let duration = start.elapsed();
             results.push(("scandir Walk API", count, duration));
         }
-        
+
         // Using scandir-rs's Scandir API:
         {
             let start = Instant::now();
             let entries = Scandir::new(dir_path, None)?.collect()?;
-            let count = entries.results.iter().filter(|entry| match entry {
-                &scandir::ScandirResult::DirEntry(ref de) => de.is_file,
-                &scandir::ScandirResult::DirEntryExt(ref de) => de.is_file,
-                &scandir::ScandirResult::Error(_) => false,
-            }).count();
+            let count = entries
+                .results
+                .iter()
+                .filter(|entry| match entry {
+                    &scandir::ScandirResult::DirEntry(ref de) => de.is_file,
+                    &scandir::ScandirResult::DirEntryExt(ref de) => de.is_file,
+                    &scandir::ScandirResult::Error(_) => false,
+                })
+                .count();
             let duration = start.elapsed();
             results.push(("scandir Scandir API", count, duration));
         }
-
 
         println!("File counting results (expected count: {}):", num_files);
         for (desc, count, duration) in results {
@@ -2736,18 +2820,18 @@ mod glob_tests {
     use globset::{Glob, GlobBuilder, GlobSetBuilder};
     use std::fs::{self, File};
     use std::io;
-    use std::path::{Path};
+    use std::path::Path;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     // Define an enum to select the matching method.
     #[derive(Clone)]
     enum Method {
-        Glob,                        // glob crate, case-sensitive
-        GlobSetFilename,             // globset matching on file names, case-sensitive
-        GlobSetFullPath,             // globset matching on full paths, case-sensitive
-        GlobCaseInsensitive,         // glob crate, case-insensitive
-        GlobSetCaseInsensitive,      // globset matching on file names, case-insensitive
+        Glob,                           // glob crate, case-sensitive
+        GlobSetFilename,                // globset matching on file names, case-sensitive
+        GlobSetFullPath,                // globset matching on full paths, case-sensitive
+        GlobCaseInsensitive,            // glob crate, case-insensitive
+        GlobSetCaseInsensitive,         // globset matching on file names, case-insensitive
         GlobSetFullPathCaseInsensitive, // globset matching on full paths, case-insensitive
     }
 
@@ -2820,10 +2904,12 @@ mod glob_tests {
             Method::GlobSetFilename => {
                 // Use globset matching on file names (case-sensitive).
                 let mut builder = GlobSetBuilder::new();
-                let compiled = Glob::new(pattern)
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let compiled =
+                    Glob::new(pattern).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 builder.add(compiled);
-                let set = builder.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let set = builder
+                    .build()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 for entry in fs::read_dir(dir_path)? {
                     let entry = entry?;
                     if entry.file_type()?.is_file() && set.is_match(entry.file_name()) {
@@ -2837,7 +2923,9 @@ mod glob_tests {
                 let compiled = Glob::new(&full_pattern)
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 builder.add(compiled);
-                let set = builder.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let set = builder
+                    .build()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 for entry in fs::read_dir(dir_path)? {
                     let entry = entry?;
                     if entry.file_type()?.is_file() && set.is_match(&entry.path()) {
@@ -2852,7 +2940,8 @@ mod glob_tests {
                     require_literal_separator: false,
                     require_literal_leading_dot: false,
                 };
-                for entry in glob_with(&glob_pattern, options).expect("Failed to read glob pattern") {
+                for entry in glob_with(&glob_pattern, options).expect("Failed to read glob pattern")
+                {
                     if let Ok(path) = entry {
                         if path.is_file() {
                             count += 1;
@@ -2868,7 +2957,9 @@ mod glob_tests {
                     .build()
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 builder.add(compiled);
-                let set = builder.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let set = builder
+                    .build()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 for entry in fs::read_dir(dir_path)? {
                     let entry = entry?;
                     if entry.file_type()?.is_file() && set.is_match(entry.file_name()) {
@@ -2884,7 +2975,9 @@ mod glob_tests {
                     .build()
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 builder.add(compiled);
-                let set = builder.build().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                let set = builder
+                    .build()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 for entry in fs::read_dir(dir_path)? {
                     let entry = entry?;
                     if entry.file_type()?.is_file() && set.is_match(&entry.path()) {
@@ -2903,9 +2996,9 @@ mod glob_tests {
         let file_counts = vec![100, 1_000, 10_000, 100_000];
         // Define a set of glob patterns to test.
         let patterns = vec![
-            "*.txt",                // simple pattern
-            "testmatch*.txt",       // specific pattern requiring a "testmatch" prefix
-            "test[0-9]match*.txt",   // pattern with a character range
+            "*.txt",               // simple pattern
+            "testmatch*.txt",      // specific pattern requiring a "testmatch" prefix
+            "test[0-9]match*.txt", // pattern with a character range
         ];
         // Test both without subdirectories and with subdirectories.
         let subdir_options = vec![false, true];
@@ -2915,8 +3008,14 @@ mod glob_tests {
             ("globset filename", Method::GlobSetFilename),
             ("globset fullpath", Method::GlobSetFullPath),
             ("glob (case-insensitive)", Method::GlobCaseInsensitive),
-            ("globset (case-insensitive, filename)", Method::GlobSetCaseInsensitive),
-            ("globset (case-insensitive, fullpath)", Method::GlobSetFullPathCaseInsensitive),
+            (
+                "globset (case-insensitive, filename)",
+                Method::GlobSetCaseInsensitive,
+            ),
+            (
+                "globset (case-insensitive, fullpath)",
+                Method::GlobSetFullPathCaseInsensitive,
+            ),
         ];
 
         // Loop over each combination of file count, pattern, and subdirectory option.
@@ -2929,7 +3028,8 @@ mod glob_tests {
                         count, pattern, use_subdirs
                     );
                     for (method_name, method) in &methods {
-                        let (duration, matched) = run_benchmark(count, pattern, use_subdirs, method.clone())?;
+                        let (duration, matched) =
+                            run_benchmark(count, pattern, use_subdirs, method.clone())?;
                         println!(
                             "{:40} => Duration: {:?}, Matched: {}",
                             method_name, duration, matched
@@ -2943,18 +3043,12 @@ mod glob_tests {
     }
 }
 
-
 // cargo test --release -- --nocapture collect_tests
 #[cfg(test)]
 mod collect_tests {
     use super::*; // Import everything from the parent module, including collect_matching_files.
     use globset::{Glob, GlobSetBuilder};
-    use std::{
-        fs,
-        io,
-        os::unix::fs::symlink,
-        path::{Path},
-    };
+    use std::{fs, io, os::unix::fs::symlink, path::Path};
     use tempfile::TempDir;
 
     /// Helper function: Build a globset matcher from a given pattern.
@@ -2991,16 +3085,18 @@ mod collect_tests {
         collected.sort();
 
         // Build expected full paths.
-        let mut expected: Vec<CString> = matching_files.iter().map(|s| {
-            let dir_bytes = dir.as_os_str().as_bytes();
-            let mut full_path_bytes = Vec::with_capacity(dir_bytes.len() + 1 + s.len());
-            full_path_bytes.extend_from_slice(dir_bytes);
-            full_path_bytes.push(b'/');
-            full_path_bytes.extend_from_slice(s.as_bytes());
-            CString::new(full_path_bytes).unwrap()
-        }).collect();
+        let mut expected: Vec<CString> = matching_files
+            .iter()
+            .map(|s| {
+                let dir_bytes = dir.as_os_str().as_bytes();
+                let mut full_path_bytes = Vec::with_capacity(dir_bytes.len() + 1 + s.len());
+                full_path_bytes.extend_from_slice(dir_bytes);
+                full_path_bytes.push(b'/');
+                full_path_bytes.extend_from_slice(s.as_bytes());
+                CString::new(full_path_bytes).unwrap()
+            })
+            .collect();
         expected.sort();
-
 
         assert_eq!(
             collected, expected,
@@ -3068,7 +3164,7 @@ mod collect_tests {
                 v.push(b'/');
                 v.extend_from_slice(b".hidden.txt");
                 CString::new(v).unwrap()
-            }
+            },
         ];
         expected.sort();
 
@@ -3099,7 +3195,10 @@ mod collect_tests {
         collect_matching_files(dir, &matcher)?;
         assert_eq!(files.len(), 1, "Expected only one regular file to be collected (directories and symlinks should be skipped)");
         let target_c = CString::new(target.as_os_str().as_bytes()).unwrap();
-        assert_eq!(files[0], target_c, "Collected file is not the expected regular file");
+        assert_eq!(
+            files[0], target_c,
+            "Collected file is not the expected regular file"
+        );
         Ok(())
     }
 
@@ -3109,7 +3208,10 @@ mod collect_tests {
         let fake_dir = Path::new("/this/dir/should/not/exist");
         let matcher = build_matcher("*.txt");
         let result = collect_matching_files(fake_dir, &matcher);
-        assert!(result.is_err(), "Expected an error for a nonexistent directory");
+        assert!(
+            result.is_err(),
+            "Expected an error for a nonexistent directory"
+        );
     }
 
     /// Test error handling when directory permission is denied.
@@ -3143,7 +3245,7 @@ mod collect_tests {
         let temp_dir = TempDir::new()?;
         let dir = temp_dir.path();
         let num_files = 100_000; // Adjust as needed.
-        // Create 100_000 files; half match "testmatch*.txt".
+                                 // Create 100_000 files; half match "testmatch*.txt".
         for i in 0..num_files {
             let fname = if i % 2 == 0 {
                 format!("testmatch{:06}.txt", i)
@@ -3172,7 +3274,7 @@ mod collect_tests {
 // cargo test --release -- --nocapture rayon_tune
 #[cfg(test)]
 mod rayon_tune {
-    use super::{count_matches, run_deletion_rayon, N_CPUS_F, NoOpProgressBar, Progress};
+    use super::{count_matches, run_deletion_rayon, NoOpProgressBar, Progress, N_CPUS_F};
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::time::Instant;
@@ -3276,8 +3378,6 @@ mod rayon_tune {
     }
 }
 
-
-
 #[cfg(test)]
 mod shell_binary_correctness_tests {
     use std::fs;
@@ -3353,8 +3453,14 @@ mod shell_binary_correctness_tests {
         let file = temp.path().join("data.dat");
         create_file(&file, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"*.txt\"", temp.path());
-        assert_eq!(exit_code, 0, "Deletion with no matching pattern did not succeed gracefully");
-        assert!(file_exists(&file), "File should not be deleted when no match");
+        assert_eq!(
+            exit_code, 0,
+            "Deletion with no matching pattern did not succeed gracefully"
+        );
+        assert!(
+            file_exists(&file),
+            "File should not be deleted when no match"
+        );
     }
 
     // --- Deletion of a file with spaces in its name ---
@@ -3376,7 +3482,10 @@ mod shell_binary_correctness_tests {
         create_file(&file, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"special_!@#$.txt\"", temp.path());
         assert_eq!(exit_code, 0, "Deletion with special characters failed");
-        assert!(!file_exists(&file), "File with special characters was not deleted");
+        assert!(
+            !file_exists(&file),
+            "File with special characters was not deleted"
+        );
     }
 
     // --- Deletion of a readonly file ---
@@ -3407,7 +3516,10 @@ mod shell_binary_correctness_tests {
         let (_stdout, _stderr, exit_code) =
             run_del(&format!("\"{}\"", abs_path.display()), temp.path());
         assert_eq!(exit_code, 0, "Absolute path deletion failed");
-        assert!(!file_exists(&file), "File was not deleted via absolute path");
+        assert!(
+            !file_exists(&file),
+            "File was not deleted via absolute path"
+        );
     }
 
     // --- Running the binary with no arguments should print usage and error ---
@@ -3420,9 +3532,15 @@ mod shell_binary_correctness_tests {
             .current_dir(temp.path())
             .output()
             .expect("Failed to run binary without arguments");
-        assert!(!output.status.success(), "Binary must error when no arguments provided");
+        assert!(
+            !output.status.success(),
+            "Binary must error when no arguments provided"
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("Usage:"), "Expected usage message when no arguments are given");
+        assert!(
+            stderr.contains("Usage:"),
+            "Expected usage message when no arguments are given"
+        );
     }
 
     // --- Deletion using a subdirectory in the pattern ---
@@ -3447,7 +3565,10 @@ mod shell_binary_correctness_tests {
         create_file(&file_txt, "data");
         create_file(&file_log, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"file.[tl]??\"", temp.path());
-        assert_eq!(exit_code, 0, "Deletion with wildcard covering multiple extensions failed");
+        assert_eq!(
+            exit_code, 0,
+            "Deletion with wildcard covering multiple extensions failed"
+        );
         assert!(!file_exists(&file_txt), "file.txt was not deleted");
         assert!(!file_exists(&file_log), "file.log was not deleted");
     }
@@ -3460,7 +3581,10 @@ mod shell_binary_correctness_tests {
         create_file(&file, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"file\\[1\\].txt\"", temp.path());
         assert_eq!(exit_code, 0, "Deletion with escaped characters failed");
-        assert!(!file_exists(&file), "File with escaped characters was not deleted");
+        assert!(
+            !file_exists(&file),
+            "File with escaped characters was not deleted"
+        );
     }
 
     // --- Case‑sensitive matching (pattern in different case should not match) ---
@@ -3471,7 +3595,10 @@ mod shell_binary_correctness_tests {
         create_file(&file, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"mixedcase.txt\"", temp.path());
         assert_eq!(exit_code, 0, "Case sensitivity test failed");
-        assert!(file_exists(&file), "File should remain because pattern matching is case‑sensitive");
+        assert!(
+            file_exists(&file),
+            "File should remain because pattern matching is case‑sensitive"
+        );
     }
 
     // --- Supplying extra arguments causes an error ---
@@ -3484,8 +3611,14 @@ mod shell_binary_correctness_tests {
         create_file(&file2, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"a.txt\" \"b.txt\"", temp.path());
         assert_ne!(exit_code, 0, "Extra arguments must cause an error");
-        assert!(file_exists(&file1), "File a.txt must not be deleted on error");
-        assert!(file_exists(&file2), "File b.txt must not be deleted on error");
+        assert!(
+            file_exists(&file1),
+            "File a.txt must not be deleted on error"
+        );
+        assert!(
+            file_exists(&file2),
+            "File b.txt must not be deleted on error"
+        );
     }
 
     // --- Wildcard in the middle of the pattern ---
@@ -3498,8 +3631,14 @@ mod shell_binary_correctness_tests {
         create_file(&file2, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"start*middle*end.txt\"", temp.path());
         assert_eq!(exit_code, 0, "Wildcard in middle deletion failed");
-        assert!(!file_exists(&file1), "File matching pattern was not deleted");
-        assert!(file_exists(&file2), "File not matching pattern was erroneously deleted");
+        assert!(
+            !file_exists(&file1),
+            "File matching pattern was not deleted"
+        );
+        assert!(
+            file_exists(&file2),
+            "File not matching pattern was erroneously deleted"
+        );
     }
 
     // --- A trailing slash in the pattern is invalid ---
@@ -3510,7 +3649,10 @@ mod shell_binary_correctness_tests {
         create_file(&file, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"file.txt/\"", temp.path());
         assert_ne!(exit_code, 0, "A trailing slash should cause an error");
-        assert!(file_exists(&file), "File must not be deleted when pattern is invalid");
+        assert!(
+            file_exists(&file),
+            "File must not be deleted when pattern is invalid"
+        );
     }
 
     // --- An invalid glob pattern produces an error ---
@@ -3533,7 +3675,11 @@ mod shell_binary_correctness_tests {
         assert_eq!(exit_code, 0, "Large number files deletion failed");
         for i in 0..100 {
             let file = temp.path().join(format!("file{:03}.txt", i));
-            assert!(!file_exists(&file), "File {} was not deleted", file.display());
+            assert!(
+                !file_exists(&file),
+                "File {} was not deleted",
+                file.display()
+            );
         }
     }
 
@@ -3555,8 +3701,14 @@ mod shell_binary_correctness_tests {
         let file = temp.path().join("success.txt");
         create_file(&file, "data");
         let (stdout, _stderr, exit_code) = run_del("\"success.txt\"", temp.path());
-        assert_eq!(exit_code, 0, "Deletion should succeed and produce a success message");
-        assert!(stdout.contains("deleted successfully"), "Expected success message not found");
+        assert_eq!(
+            exit_code, 0,
+            "Deletion should succeed and produce a success message"
+        );
+        assert!(
+            stdout.contains("deleted successfully"),
+            "Expected success message not found"
+        );
     }
 
     // --- No unintended side effects (only matching files are deleted) ---
@@ -3570,7 +3722,10 @@ mod shell_binary_correctness_tests {
         let (_stdout, _stderr, exit_code) = run_del("\"delete_me.txt\"", temp.path());
         assert_eq!(exit_code, 0, "Deletion must succeed without side effects");
         assert!(!file_exists(&delete_file), "Matching file was not deleted");
-        assert!(file_exists(&keep_file), "Non‑matching file was deleted inadvertently");
+        assert!(
+            file_exists(&keep_file),
+            "Non‑matching file was deleted inadvertently"
+        );
     }
 
     // --- Wide glob pattern deletes only matching files ---
@@ -3592,10 +3747,18 @@ mod shell_binary_correctness_tests {
         let (_stdout, _stderr, exit_code) = run_del("\"m*.txt\"", temp.path());
         assert_eq!(exit_code, 0, "Wide glob pattern deletion failed");
         for file in delete_files {
-            assert!(!file_exists(&file), "File {} should be deleted", file.display());
+            assert!(
+                !file_exists(&file),
+                "File {} should be deleted",
+                file.display()
+            );
         }
         for file in keep_files {
-            assert!(file_exists(&file), "File {} should not be deleted", file.display());
+            assert!(
+                file_exists(&file),
+                "File {} should not be deleted",
+                file.display()
+            );
         }
     }
 
@@ -3607,7 +3770,10 @@ mod shell_binary_correctness_tests {
         create_file(&file, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"tokio.txt\" --tokio", temp.path());
         assert_eq!(exit_code, 0, "Deletion with --tokio flag failed");
-        assert!(!file_exists(&file), "File was not deleted using --tokio flag");
+        assert!(
+            !file_exists(&file),
+            "File was not deleted using --tokio flag"
+        );
     }
 
     // --- Deletion using the --rayon flag ---
@@ -3618,7 +3784,10 @@ mod shell_binary_correctness_tests {
         create_file(&file, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"rayon.txt\" --rayon", temp.path());
         assert_eq!(exit_code, 0, "Deletion with --rayon flag failed");
-        assert!(!file_exists(&file), "File was not deleted using --rayon flag");
+        assert!(
+            !file_exists(&file),
+            "File was not deleted using --rayon flag"
+        );
     }
 
     // --- Supplying unexpected extra arguments causes an error ---
@@ -3628,8 +3797,14 @@ mod shell_binary_correctness_tests {
         let file = temp.path().join("extra.txt");
         create_file(&file, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"extra.txt\" extra_argument", temp.path());
-        assert_ne!(exit_code, 0, "Extra unexpected arguments must cause an error");
-        assert!(file_exists(&file), "File must not be deleted when extra arguments are provided");
+        assert_ne!(
+            exit_code, 0,
+            "Extra unexpected arguments must cause an error"
+        );
+        assert!(
+            file_exists(&file),
+            "File must not be deleted when extra arguments are provided"
+        );
     }
 
     // --- Sequential deletion path (fewer than 11 files) ---
@@ -3644,12 +3819,13 @@ mod shell_binary_correctness_tests {
         assert_eq!(exit_code, 0, "Sequential deletion failed");
         for i in 0..5 {
             let file = temp.path().join(format!("seq_file_{}.txt", i));
-            assert!(!file_exists(&file), "File {} was not deleted sequentially", file.display());
+            assert!(
+                !file_exists(&file),
+                "File {} was not deleted sequentially",
+                file.display()
+            );
         }
     }
-
-
-    // Glob tests below ========================================
 
     // 1. Basic literal deletion.
     #[test]
@@ -3788,7 +3964,10 @@ mod shell_binary_correctness_tests {
         let (_stdout, _stderr, exit_code) = run_del("\"f*e?.txt\"", temp.path());
         assert_eq!(exit_code, 0, "Combined wildcards deletion failed");
         assert!(!file_exists(&file_match), "fxxe1.txt was not deleted");
-        assert!(file_exists(&file_nomatch), "fxxe12.txt should not be deleted");
+        assert!(
+            file_exists(&file_nomatch),
+            "fxxe12.txt should not be deleted"
+        );
     }
 
     // ========================================================================
@@ -3818,7 +3997,10 @@ mod shell_binary_correctness_tests {
         create_file(&file_deleted, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"file[!X].txt\"", temp.path());
         assert_eq!(exit_code, 0, "Negated character class deletion 1 failed");
-        assert!(file_exists(&file_excluded), "fileX.txt should not be deleted");
+        assert!(
+            file_exists(&file_excluded),
+            "fileX.txt should not be deleted"
+        );
         assert!(!file_exists(&file_deleted), "fileY.txt was not deleted");
     }
 
@@ -3835,7 +4017,10 @@ mod shell_binary_correctness_tests {
         let (_stdout, _stderr, exit_code) = run_del("\"data[!0-9].txt\"", temp.path());
         assert_eq!(exit_code, 0, "Negated character class deletion 2 failed");
         assert!(!file_exists(&file_deleted), "dataA.txt was not deleted");
-        assert!(file_exists(&file_excluded), "data1.txt should not be deleted");
+        assert!(
+            file_exists(&file_excluded),
+            "data1.txt should not be deleted"
+        );
     }
 
     // ========================================================================
@@ -3850,7 +4035,10 @@ mod shell_binary_correctness_tests {
         create_file(&file_deleted, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"log[!e]file.txt\"", temp.path());
         assert_eq!(exit_code, 0, "Negated character class deletion 3 failed");
-        assert!(file_exists(&file_excluded), "logefile.txt should not be deleted");
+        assert!(
+            file_exists(&file_excluded),
+            "logefile.txt should not be deleted"
+        );
         assert!(!file_exists(&file_deleted), "logifile.txt was not deleted");
     }
 
@@ -3866,7 +4054,10 @@ mod shell_binary_correctness_tests {
         create_file(&file_deleted, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"report[!_.].txt\"", temp.path());
         assert_eq!(exit_code, 0, "Negated character class deletion 4 failed");
-        assert!(file_exists(&file_excluded), "report_.txt should not be deleted");
+        assert!(
+            file_exists(&file_excluded),
+            "report_.txt should not be deleted"
+        );
         assert!(!file_exists(&file_deleted), "report-.txt was not deleted");
     }
 
@@ -3882,14 +4073,15 @@ mod shell_binary_correctness_tests {
         create_file(&file_deleted, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"img[!0].png\"", temp.path());
         assert_eq!(exit_code, 0, "Negated character class deletion 5 failed");
-        assert!(file_exists(&file_excluded), "img0.png should not be deleted");
+        assert!(
+            file_exists(&file_excluded),
+            "img0.png should not be deleted"
+        );
         assert!(!file_exists(&file_deleted), "img1.png was not deleted");
     }
 
     // ========================================================================
     // 16. Negated character class deletion test 6:
-    // “Delete this except for that”: delete files that do NOT have an underscore
-    // immediately after "target". That is, delete "target.txt" but not "target_excluded.txt".
     #[test]
     fn negated_character_class_deletion_6() {
         let temp = tempdir().unwrap();
@@ -3897,11 +4089,18 @@ mod shell_binary_correctness_tests {
         let file_excluded = temp.path().join("target_excluded.txt");
         create_file(&file_deleted, "data");
         create_file(&file_excluded, "data");
-        let (_stdout, _stderr, exit_code) = run_del("\"target[!_]*.txt\"", temp.path());
+        // Use brace expansion to match exactly "target.txt" or any file where the first
+        // character after "target" is not an underscore.
+        let (_stdout, _stderr, exit_code) =
+            run_del("\"target{.txt,[!_]*.txt}\"", temp.path());
         assert_eq!(exit_code, 0, "Negated character class deletion 6 failed");
         assert!(!file_exists(&file_deleted), "target.txt was not deleted");
-        assert!(file_exists(&file_excluded), "target_excluded.txt should not be deleted");
+        assert!(
+            file_exists(&file_excluded),
+            "target_excluded.txt should not be deleted"
+        );
     }
+
 
     // ========================================================================
     // 17. Repeat literal deletion for extra coverage.
@@ -3939,7 +4138,10 @@ mod shell_binary_correctness_tests {
         let (_stdout, _stderr, exit_code) = run_del("\"a*b*c.txt\"", temp.path());
         assert_eq!(exit_code, 0, "Multiple asterisk deletion failed");
         assert!(!file_exists(&file_match), "a123b456c.txt was not deleted");
-        assert!(file_exists(&file_nomatch), "a123b456d.txt should not be deleted");
+        assert!(
+            file_exists(&file_nomatch),
+            "a123b456d.txt should not be deleted"
+        );
     }
 
     // ========================================================================
@@ -3954,7 +4156,10 @@ mod shell_binary_correctness_tests {
         let (_stdout, _stderr, exit_code) = run_del("\"????.txt\"", temp.path());
         assert_eq!(exit_code, 0, "Four-character question mark deletion failed");
         assert!(!file_exists(&file_match), "abcd.txt was not deleted");
-        assert!(file_exists(&file_nomatch), "abcde.txt should not be deleted");
+        assert!(
+            file_exists(&file_nomatch),
+            "abcde.txt should not be deleted"
+        );
     }
 
     // ========================================================================
@@ -3967,7 +4172,10 @@ mod shell_binary_correctness_tests {
         create_file(&file_match, "data");
         create_file(&file_nomatch, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"data*?.log\"", temp.path());
-        assert_eq!(exit_code, 0, "Combined asterisk and question mark deletion failed");
+        assert_eq!(
+            exit_code, 0,
+            "Combined asterisk and question mark deletion failed"
+        );
         assert!(!file_exists(&file_match), "dataX.log was not deleted");
         assert!(file_exists(&file_nomatch), "data.log should not be deleted");
     }
@@ -3986,7 +4194,10 @@ mod shell_binary_correctness_tests {
         create_file(&file_log, "data");
         create_file(&file_md, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"log.{txt,csv,log}\"", temp.path());
-        assert_eq!(exit_code, 0, "Alternation with three options deletion failed");
+        assert_eq!(
+            exit_code, 0,
+            "Alternation with three options deletion failed"
+        );
         assert!(!file_exists(&file_txt), "log.txt was not deleted");
         assert!(!file_exists(&file_csv), "log.csv was not deleted");
         assert!(!file_exists(&file_log), "log.log was not deleted");
@@ -4023,7 +4234,10 @@ mod shell_binary_correctness_tests {
         create_file(&file2, "data");
         create_file(&file3, "data");
         let (_stdout, _stderr, exit_code) = run_del("\"test{1,2}*.txt\"", temp.path());
-        assert_eq!(exit_code, 0, "Complex alternation and wildcard deletion failed");
+        assert_eq!(
+            exit_code, 0,
+            "Complex alternation and wildcard deletion failed"
+        );
         assert!(!file_exists(&file1), "test1.txt was not deleted");
         assert!(!file_exists(&file2), "test2_extra.txt was not deleted");
         assert!(file_exists(&file3), "test3.txt should not be deleted");
@@ -4041,6 +4255,5 @@ mod shell_binary_correctness_tests {
         assert!(!file_exists(&file), "log?.txt was not deleted");
     }
 }
-
 
 // cargo test --release -- --nocapture
