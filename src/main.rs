@@ -53,8 +53,7 @@ impl<'a> ProgressReporter for RealProgressBar<'a> {
 
     #[inline(always)]
     fn finish(&self) {
-        // Finalize the progress bar directly using the shared Arc reference.
-        self.bar.finish();
+        // No-op: Rely on Bar's Drop implementation for cleanup, so there's zero overhead.
     }
 }
 
