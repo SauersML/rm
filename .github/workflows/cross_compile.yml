@@ -8,7 +8,6 @@ on:
 
 jobs:
   build:
-    # "fail-fast: false" so if one target fails, the others still build.
     strategy:
       fail-fast: false
       matrix:
@@ -28,39 +27,34 @@ jobs:
             target: aarch64-apple-darwin
             use_cross: false
             artifact_suffix: "macOS_arm64"
-      
+
     runs-on: ${{ matrix.os }}
 
     steps:
-      #  Check out Rust project
       - name: Check out source
         uses: actions/checkout@v4
 
-      #  Install the Rust toolchain + the needed target
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      #  Install cross (only if "use_cross" is true)
       - name: Install cross
         if: ${{ matrix.use_cross }}
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      #  Build your binary
       - name: Build
         shell: bash
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} --bin 
+            cross build --release --target ${{ matrix.target }} --bin del
           else
-            cargo build --release --target ${{ matrix.target }} --bin 
+            cargo build --release --target ${{ matrix.target }} --bin del
           fi
-  
-      #  Copy the artifact to a friendly name
+
       - name: Stage artifact
         run: |
-          BIN_NAME=""
+          BIN_NAME="del"
           SUFFIX=""
           if [[ "${{ matrix.target }}" == *"windows"* ]]; then
             SUFFIX=".exe"
@@ -75,9 +69,8 @@ jobs:
             exit 1
           fi
 
-      #   Upload the artifact
       - name: Upload artifact to GitHub
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: ${{ format('{0}-{1}{2}', '', matrix.artifact_suffix, contains(matrix.target, 'windows') && '.exe' || '') }}
+          path: ${{ format('{0}-{1}{2}', 'del', matrix.artifact_suffix, contains(matrix.target, 'windows') && '.exe' || '') }}
