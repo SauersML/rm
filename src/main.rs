@@ -257,9 +257,8 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
     let pr_for_tasks = progress_reporter.clone();
     file_stream
         .for_each_concurrent(Some(concurrency), move |filename_cstr| {
-            let progress_reporter_value = pr_for_tasks.clone();
+            let progress_reporter = pr_for_tasks.clone();
             async move {
-                let progress_reporter = progress_reporter_value.clone();
                 let result = unsafe { libc::unlinkat(fd, filename_cstr.as_ptr(), 0) };
 
                 if result == 0 {
@@ -667,11 +666,11 @@ async fn run_deletion_tokio<P: ProgressReporter + Clone>(
     let pr_for_tasks = progress_reporter.clone();
     file_stream
         .for_each_concurrent(Some(concurrency), move |filename_cstr| {
-            let progress_reporter_value = pr_for_tasks.clone();
+            let progress_reporter = pr_for_tasks.clone();
             async move {
                 let result = unsafe { libc::unlink(filename_cstr.as_ptr()) };
                 if result == 0 {
-                    progress_reporter_value.inc(1);
+                    progress_reporter.inc(1);
                 } else {
                     let e = std::io::Error::last_os_error();
                     eprintln!(
