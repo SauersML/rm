@@ -1,0 +1,83 @@
+name: Cross-Compile
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build:
+    # "fail-fast: false" so if one target fails, the others still build.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux (cross)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            use_cross: true
+            artifact_suffix: "linux_x86_64_gnu"
+
+          # macOS (native Cargo)
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            use_cross: false
+            artifact_suffix: "macOS_x86_64"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            use_cross: false
+            artifact_suffix: "macOS_arm64"
+      
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      #  Check out Rust project
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      #  Install the Rust toolchain + the needed target
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      #  Install cross (only if "use_cross" is true)
+      - name: Install cross
+        if: ${{ matrix.use_cross }}
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      #  Build your binary
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --bin 
+          else
+            cargo build --release --target ${{ matrix.target }} --bin 
+          fi
+  
+      #  Copy the artifact to a friendly name
+      - name: Stage artifact
+        run: |
+          BIN_NAME=""
+          SUFFIX=""
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            SUFFIX=".exe"
+          fi
+
+          ARTIFACT="target/${{ matrix.target }}/release/${BIN_NAME}${SUFFIX}"
+
+          if [ -f "$ARTIFACT" ]; then
+            cp "$ARTIFACT" "${BIN_NAME}-${{ matrix.artifact_suffix }}${SUFFIX}"
+          else
+            echo "Artifact not found: $ARTIFACT"
+            exit 1
+          fi
+
+      #   Upload the artifact
+      - name: Upload artifact to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ format('{0}-{1}{2}', '', matrix.artifact_suffix, contains(matrix.target, 'windows') && '.exe' || '') }}
