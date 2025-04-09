@@ -1817,6 +1817,7 @@ mod t_r_performance {
 
 // cargo test --release -- --nocapture performance_tests
 #[cfg(test)]
+#[cfg(test)]
 mod performance_tests {
     use glob;
     use std::{
@@ -1826,10 +1827,26 @@ mod performance_tests {
         process::Command,
         time::Instant,
     };
-    use tempfile::tempdir;
-    use tokio::runtime::Builder;
+    // use tempfile::tempdir; // We will use the Builder API instead
+    use tempfile::Builder as TempBuilder; // Use Builder to specify the parent directory
+    use tokio::runtime::Builder as TokioBuilder; // Alias tokio's Builder to avoid name clash
 
     use super::{count_matches, run_deletion_tokio, NoOpProgressBar, Progress};
+
+    /// Returns the base test directory for persistent storage tests.
+    ///
+    /// Creates the directory `$HOME/tmp_perf_test` if it doesn't exist.
+    /// This ensures tests run on a potentially larger, persistent filesystem
+    /// instead of the default system temporary directory which might be `tmpfs`.
+    /// Panics if the HOME environment variable is not set or the directory cannot be created.
+    fn persistent_test_dir_base() -> PathBuf {
+        let home = std::env::var("HOME").expect("HOME environment variable not set");
+        // Use a specific subdirectory within $HOME for these tests
+        let base = PathBuf::from(home).join("tmp_perf_test");
+        fs::create_dir_all(&base)
+            .expect("Failed to create persistent base test directory at $HOME/tmp_perf_test");
+        base
+    }
 
     /// Creates test files in `dir` using a standard naming scheme (e.g. "test_file_0.dat").
     fn create_test_files(dir: &Path, count: usize, size_kb: usize) -> Vec<PathBuf> {
@@ -1876,7 +1893,7 @@ mod performance_tests {
     /// Returns the elapsed time (in seconds) and verifies that no matching files remain.
     fn measure_rust_deletion(pattern: &str) -> f64 {
         let start = Instant::now();
-        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = TokioBuilder::new_current_thread().enable_all().build().unwrap();
 
         // Get the directory FD and matching files.
         let (fd, matched_files) = match count_matches(pattern).unwrap() {
@@ -1995,9 +2012,9 @@ mod performance_tests {
         use_short_names: bool,
         use_find_for_rm: bool,
     ) -> BenchmarkResult {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = TempBuilder::new().prefix("perf_").tempdir_in(persistent_test_dir_base()).unwrap();
         let base_path = temp_dir.path().to_path_buf();
-
+    
         // Choose the file creation function and matching glob pattern based on the naming scheme.
         let (pattern, create_fn): (String, fn(&Path, usize, usize) -> Vec<PathBuf>) =
             if use_short_names {
@@ -2129,7 +2146,7 @@ mod performance_tests {
     #[test]
     fn test_delete_with_no_matches() {
         println!("\n--- Deletion with No Matches ---");
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = TempBuilder::new().prefix("no_match_").tempdir_in(persistent_test_dir_base()).unwrap();
         let base = temp_dir.path().to_string_lossy().to_string();
         let pattern = format!("{}/no_such_file_*.dat", base);
 
@@ -2144,7 +2161,7 @@ mod performance_tests {
     #[test]
     fn test_skips_directories() {
         println!("\n--- Skipping Directories ---");
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = TempBuilder::new().prefix("skip_dir_").tempdir_in(persistent_test_dir_base()).unwrap();
         let dir_path = temp_dir.path().join("my_test_dir");
         fs::create_dir(&dir_path).unwrap();
 
@@ -2171,7 +2188,7 @@ mod performance_tests {
     #[test]
     fn test_partial_match_deletion() {
         println!("\n--- Partial Pattern Deletion ---");
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = TempBuilder::new().prefix("partial_").tempdir_in(persistent_test_dir_base()).unwrap();
         let base = temp_dir.path();
 
         // Create files that match the pattern.
