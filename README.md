@@ -40,6 +40,11 @@ Or build the program:
 RUSTFLAGS="-C target-cpu=native" cargo build --release
 ```
 
+If you run into issues with GLIBC, try this:
+```
+RUSTFLAGS="-C target-cpu=native -C lto=fat -C codegen-units=1" cargo build --release --target x86_64-unknown-linux-musl
+```
+
 ## Usage
 
 Run the utility with the glob pattern of the files you want to delete:
