@@ -2683,7 +2683,7 @@ mod file_count_tests {
                     let reclen = (*d).d_reclen as usize;
                     let name_ptr = (*d).d_name.as_ptr();
                     // Fast manual check for "." and ".." without creating a CStr.
-                    if *name_ptr != b'.' as i8 {
+                    if *name_ptr != b'.' {
                         if (*d).d_type == libc::DT_REG {
                             count += 1;
                         }
@@ -2691,7 +2691,7 @@ mod file_count_tests {
                         let second = *name_ptr.add(1);
                         if second == 0 {
                             // It's ".", skip.
-                        } else if second == b'.' as i8 && *name_ptr.add(2) == 0 {
+                        } else if second == b'.' && *name_ptr.add(2) == 0 {
                             // It's "..", skip.
                         } else if (*d).d_type == libc::DT_REG {
                             count += 1;
