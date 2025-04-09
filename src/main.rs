@@ -2700,18 +2700,28 @@ mod file_count_tests {
                     let reclen = (*d).d_reclen as usize;
                     let name_ptr = (*d).d_name.as_ptr();
                     // Fast manual check for "." and ".." without creating a CStr.
-                    if *name_ptr != b'.' {
+                    // Explicitly cast the dereferenced pointer value to u8 before comparing.
+                    // This means a robust u8 vs u8 comparison regardless of platform type inference.
+                    if (*name_ptr as u8) != b'.' {
+                        // If the first char is not '.', it might be a valid file.
+                        // Check if it's a regular file before counting.
                         if (*d).d_type == libc::DT_REG {
                             count += 1;
                         }
                     } else {
-                        let second = *name_ptr.add(1);
+                        // If the first char IS '.', check the second char.
+                        // Cast the second byte to u8 as well for comparison.
+                        let second = *name_ptr.add(1) as u8;
                         if second == 0 {
-                            // It's ".", skip.
+                            // Filename is exactly ".", skip.
                         } else if second == b'.' && *name_ptr.add(2) == 0 {
-                            // It's "..", skip.
-                        } else if (*d).d_type == libc::DT_REG {
-                            count += 1;
+                            // Filename is exactly "..", skip.
+                        } else {
+                            // Filename starts with '.' but is not "." or "..", e.g. ".hiddenfile"
+                            // Check if it's a regular file before counting.
+                            if (*d).d_type == libc::DT_REG {
+                                count += 1;
+                            }
                         }
                     }
                     bpos += reclen;
